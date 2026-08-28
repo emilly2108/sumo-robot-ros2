@@ -106,26 +106,6 @@
     </tbody>
   </table>
 
-  <h2>색상 패턴별 행동표</h2>
-  <p class="small">패턴 순서는 항상 <code>(sensor1, sensor2, sensor3)</code>, 즉 <code>(오른쪽 앞, 왼쪽 앞, 뒤)</code>입니다. 아래 표는 스위치가 ON이고 벽이 가까이 있지 않은 상태를 기준으로 합니다.</p>
-  <table>
-    <thead><tr><th>센서 조합</th><th>색깔 상태</th><th>초록색 없음·벽 없음</th><th>초록색 인식</th><th>동작</th></tr></thead>
-    <tbody>
-      <tr><td><code>(0, 0, 0)</code></td><td>앞·뒤 모두 검정</td><td>기본 속도로 직진</td><td>초록색 추격</td><td><code>Cruise_Action</code></td></tr>
-      <tr><td><code>(1, 0, 0)</code></td><td>앞 오른쪽 빨강만</td><td>원래 경로로 계속 주행</td><td>초록색 추격</td><td>한쪽만 감지했으므로 회피하지 않음</td></tr>
-      <tr><td><code>(0, 1, 0)</code></td><td>앞 왼쪽 빨강만</td><td>원래 경로로 계속 주행</td><td>초록색 추격</td><td>한쪽만 감지했으므로 회피하지 않음</td></tr>
-      <tr><td><code>(2, 0, 0)</code></td><td>앞 오른쪽 파랑만</td><td>원래 경로로 계속 주행</td><td>초록색 추격</td><td>한쪽만 감지했으므로 회피하지 않음</td></tr>
-      <tr><td><code>(0, 2, 0)</code></td><td>앞 왼쪽 파랑만</td><td>원래 경로로 계속 주행</td><td>초록색 추격</td><td>한쪽만 감지했으므로 회피하지 않음</td></tr>
-      <tr><td><code>(1, 1, 0)</code></td><td>앞 양쪽 빨강</td><td>후진 후 45도 회전</td><td>초록색 추격으로 전환</td><td><code>Front_Color_Avoid_Action</code></td></tr>
-      <tr><td><code>(2, 2, 0)</code></td><td>앞 양쪽 파랑</td><td>후진 후 45도 회전</td><td>초록색 추격으로 전환</td><td><code>Front_Color_Avoid_Action</code></td></tr>
-      <tr><td><code>(0, 0, 1)</code></td><td>뒤쪽 빨강만</td><td>최대 또는 추격 보조 속도</td><td>초록색 추격</td><td><code>Back_Single_Boost_Action</code></td></tr>
-      <tr><td><code>(0, 0, 2)</code></td><td>뒤쪽 파랑만</td><td>최대 또는 추격 보조 속도</td><td>초록색 추격</td><td><code>Back_Single_Boost_Action</code></td></tr>
-      <tr><td><code>(1, 1, 1)</code></td><td>모든 센서 빨강</td><td>빨강 복구 행동</td><td>초록색 추격으로 전환</td><td><code>All_Red_Recovery_Action</code></td></tr>
-      <tr><td><code>(2, 2, 2)</code></td><td>모든 센서 파랑</td><td>최대 속도 유지 후 5초 이상이면 후진</td><td>초록색 추격으로 전환</td><td><code>All_Blue_Recovery_Action</code></td></tr>
-    </tbody>
-  </table>
-  <p class="notice">벽이 가까우면 위 표보다 <code>Wall_Avoid_Action</code>이 먼저 실행됩니다. 표에 없는 서로 다른 색의 혼합 조합은 현재 전용 색상 행동이 등록되어 있지 않습니다.</p>
-
   <h2>행동 우선순위</h2>
   <ol>
     <li>스위치가 OFF이면 모든 행동 대신 Soft Stop을 보냅니다.</li>
