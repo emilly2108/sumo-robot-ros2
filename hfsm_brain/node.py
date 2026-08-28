@@ -40,25 +40,25 @@ class Hfsm_Brain_Node(Node):
         self.active_action: Action = Opening_Action(self.config)
         self.active_action.enter(now_seconds(self), self.world)
 
-        self.pub_vel = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.pub_vel = self.create_publisher(Twist, "/cmd_vel", 1)
         self.create_service(SetBool, "switch_mode", self.switch_mode_callback)
 
-        self.create_subscription(Float32, "/target_error", self.target_error_callback, 10)
+        self.create_subscription(Float32, "/target_error", self.target_error_callback, 1)
         self.create_subscription(
-            Float32, "/target_distance", self.target_distance_callback, 10
+            Float32, "/target_distance", self.target_distance_callback, 1
         )
-        self.create_subscription(Bool, "/target_found", self.target_found_callback, 10)
+        self.create_subscription(Bool, "/target_found", self.target_found_callback, 1)
         self.create_subscription(
-            Float32, "/wall_distance", self.wall_distance_callback, 10
-        )
-        self.create_subscription(
-            Float32, "/wall_left_distance", self.wall_left_callback, 10
+            Float32, "/wall_distance", self.wall_distance_callback, 1
         )
         self.create_subscription(
-            Float32, "/wall_right_distance", self.wall_right_callback, 10
+            Float32, "/wall_left_distance", self.wall_left_callback, 1
+        )
+        self.create_subscription(
+            Float32, "/wall_right_distance", self.wall_right_callback, 1
         )
         # color_node.py가 두 앞 센서의 결과를 JSON String 하나로 publish한다.
-        self.create_subscription(String, "/color_sensor", self.color_sensor_callback, 10)
+        self.create_subscription(String, "/color_sensor", self.color_sensor_callback, 1)
 
         self.last_command_label = None
         self.timer = self.create_timer(self.config.control_period, self.control_loop)
@@ -71,12 +71,6 @@ class Hfsm_Brain_Node(Node):
         self.world.target_distance = float(msg.data)
 
     def target_found_callback(self, msg: Bool) -> None:
-        if self.world.wall_frame_received:
-            self.world.wall_missing_frames = 0
-        else:
-            self.world.wall_missing_frames += 1
-        self.world.wall_frame_received = False
-
         if msg.data:
             self.world.target_found = True
             self.world.target_missing_frames = 0
@@ -86,13 +80,15 @@ class Hfsm_Brain_Node(Node):
 
     def wall_distance_callback(self, msg: Float32) -> None:
         self.world.wall_distance = float(msg.data)
-        self.world.wall_frame_received = True
+        self.world.wall_last_received_at = now_seconds(self)
 
     def wall_left_callback(self, msg: Float32) -> None:
         self.world.wall_left_distance = float(msg.data)
+        self.world.wall_last_received_at = now_seconds(self)
 
     def wall_right_callback(self, msg: Float32) -> None:
         self.world.wall_right_distance = float(msg.data)
+        self.world.wall_last_received_at = now_seconds(self)
 
     def switch_mode_callback(self, request: SetBool.Request, response: SetBool.Response):
         """switch_node.py의 물리 스위치 요청을 받아 Brain 실행 여부를 바꾼다."""
@@ -202,11 +198,14 @@ class Hfsm_Brain_Node(Node):
             self.far_green_turn_done = False
             self.world.target_missing_frames = 0
 
-        if self.world.wall_missing_frames >= 10:
+        wall_is_stale = (
+            self.world.wall_last_received_at == 0.0
+            or now - self.world.wall_last_received_at > self.config.wall_timeout
+        )
+        if wall_is_stale:
             self.world.wall_distance = self.config.no_wall_distance
             self.world.wall_left_distance = self.config.no_wall_distance
             self.world.wall_right_distance = self.config.no_wall_distance
-            self.world.wall_missing_frames = 0
 
     def transition_to(self, next_action: Action, now: float, cancelled: bool = False) -> None:
         if self.active_action.key() == next_action.key():

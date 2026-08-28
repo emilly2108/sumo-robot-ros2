@@ -58,8 +58,7 @@ class World_Model:
     wall_distance: float = 9.9
     wall_left_distance: float = 9.9
     wall_right_distance: float = 9.9
-    wall_missing_frames: int = 0
-    wall_frame_received: bool = False
+    wall_last_received_at: float = 0.0
 
     # 오른쪽 앞 센서
     sensor1: Sensor_Color = Sensor_Color.BLACK
@@ -99,6 +98,8 @@ class Brain_Config:
     turn_90_duration: float = (math.pi / 2.0) / 0.8
     # 후진 할지 말지 결정하는 5초
     all_color_push_duration: float = 5.0
+    # 실제 벽 토픽을 이 시간 이상 받지 못하면 벽 정보를 오래된 것으로 본다.
+    wall_timeout: float = 0.5
 
 
 @dataclass(frozen=True)

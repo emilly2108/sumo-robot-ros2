@@ -1,3 +1,5 @@
+import os
+
 import cv2
 import numpy as np
 import pyrealsense2 as rs
@@ -10,15 +12,17 @@ class GreenTrackerDepth(Node):
     def __init__(self):
         super().__init__('green_tracker_depth')
 
-        self.pub_error = self.create_publisher(Float32, '/target_error', 10)
-        self.pub_found = self.create_publisher(Bool, '/target_found', 10)
-        self.pub_distance = self.create_publisher(Float32, '/target_distance', 10)
-        self.pub_wall_distance = self.create_publisher(Float32, '/wall_distance', 10)
-        self.pub_wall_left = self.create_publisher(Float32, '/wall_left_distance', 10)
-        self.pub_wall_right = self.create_publisher(Float32, '/wall_right_distance', 10)
+        self.pub_error = self.create_publisher(Float32, '/target_error', 1)
+        self.pub_found = self.create_publisher(Bool, '/target_found', 1)
+        self.pub_distance = self.create_publisher(Float32, '/target_distance', 1)
+        self.pub_wall_distance = self.create_publisher(Float32, '/wall_distance', 1)
+        self.pub_wall_left = self.create_publisher(Float32, '/wall_left_distance', 1)
+        self.pub_wall_right = self.create_publisher(Float32, '/wall_right_distance', 1)
 
         self.WIDTH = 424
         self.HEIGHT = 240
+        # 424x240 is already a low-resolution profile; 15 FPS reduces Pi load.
+        self.CAMERA_FPS = 15
         self.CENTER_X = self.WIDTH // 2
         self.OFFSET_MM = 30
         self.WALL_CLOSE_DISTANCE = 0.20
@@ -28,8 +32,12 @@ class GreenTrackerDepth(Node):
         self.pipeline = rs.pipeline()
         config = rs.config()
 
-        config.enable_stream(rs.stream.color, self.WIDTH, self.HEIGHT, rs.format.bgr8, 30)
-        config.enable_stream(rs.stream.depth, self.WIDTH, self.HEIGHT, rs.format.z16, 30)
+        config.enable_stream(
+            rs.stream.color, self.WIDTH, self.HEIGHT, rs.format.bgr8, self.CAMERA_FPS
+        )
+        config.enable_stream(
+            rs.stream.depth, self.WIDTH, self.HEIGHT, rs.format.z16, self.CAMERA_FPS
+        )
 
         try:
             profile = self.pipeline.start(config)
@@ -46,13 +54,21 @@ class GreenTrackerDepth(Node):
         self.lower_green = np.array([50, 100, 50])
         self.upper_green = np.array([90, 255, 255])
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        # Keep the GUI disabled on the robot. Set SUMO_SHOW_VIEW=1 for debugging.
+        self.show_view = os.environ.get("SUMO_SHOW_VIEW", "0") == "1"
 
         self.prev_dist = 0.0
-        self.timer = self.create_timer(1.0 / 30.0, self.process_frame)
+        self.pipeline_started = True
+        self.timer = self.create_timer(1.0 / self.CAMERA_FPS, self.process_frame)
 
     def process_frame(self):
         try:
-            frames = self.pipeline.wait_for_frames()
+            # Poll without waiting so a missing frame cannot block the ROS executor.
+            # Frames that arrived while processing are discarded in favor of the latest one.
+            frames = self.pipeline.poll_for_frames()
+            if not frames:
+                return
+
             aligned_frames = self.align.process(frames)
             depth_frame = aligned_frames.get_depth_frame()
             color_frame = aligned_frames.get_color_frame()
@@ -67,8 +83,9 @@ class GreenTrackerDepth(Node):
             self.publish_wall_info(depth_image, color_image, green_mask)
             self.publish_target_info(depth_frame, color_image, green_mask)
 
-            cv2.imshow("ROS2 Green Tracker", color_image)
-            cv2.waitKey(1)
+            if self.show_view:
+                cv2.imshow("ROS2 Green Tracker", color_image)
+                cv2.waitKey(1)
 
         except Exception as e:
             self.get_logger().error(f'Frame error: {e}')
@@ -101,17 +118,18 @@ class GreenTrackerDepth(Node):
         self.pub_wall_left.publish(Float32(data=left_distance))
         self.pub_wall_right.publish(Float32(data=right_distance))
 
-        cv2.line(color_image, (left_x, 0), (left_x, self.HEIGHT), (0, 0, 255), 1)
-        cv2.line(color_image, (right_x, 0), (right_x, self.HEIGHT), (0, 0, 255), 1)
-        cv2.putText(
-            color_image,
-            f"W L:{left_distance:.2f} R:{right_distance:.2f}",
-            (8, self.HEIGHT - 12),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (0, 0, 255),
-            1,
-        )
+        if self.show_view:
+            cv2.line(color_image, (left_x, 0), (left_x, self.HEIGHT), (0, 0, 255), 1)
+            cv2.line(color_image, (right_x, 0), (right_x, self.HEIGHT), (0, 0, 255), 1)
+            cv2.putText(
+                color_image,
+                f"W L:{left_distance:.2f} R:{right_distance:.2f}",
+                (8, self.HEIGHT - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 0, 255),
+                1,
+            )
 
     def edge_distance(self, depth_image, close_wall, edge_x):
         x_min = max(0, edge_x - 3)
@@ -128,13 +146,14 @@ class GreenTrackerDepth(Node):
         found_msg = Bool()
         found_msg.data = False
 
-        cv2.line(
-            color_image,
-            (self.CENTER_X, 0),
-            (self.CENTER_X, self.HEIGHT),
-            (100, 100, 100),
-            1,
-        )
+        if self.show_view:
+            cv2.line(
+                color_image,
+                (self.CENTER_X, 0),
+                (self.CENTER_X, self.HEIGHT),
+                (100, 100, 100),
+                1,
+            )
 
         if contours:
             target = max(contours, key=cv2.contourArea)
@@ -165,32 +184,35 @@ class GreenTrackerDepth(Node):
                 self.pub_distance.publish(Float32(data=float(dist)))
                 found_msg.data = True
 
-                cv2.line(
-                    color_image,
-                    (shifted_center_x, 0),
-                    (shifted_center_x, self.HEIGHT),
-                    (255, 255, 255),
-                    1,
-                )
-                cv2.rectangle(color_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.circle(color_image, (cx, cy), 4, (0, 0, 255), -1)
+                if self.show_view:
+                    cv2.line(
+                        color_image,
+                        (shifted_center_x, 0),
+                        (shifted_center_x, self.HEIGHT),
+                        (255, 255, 255),
+                        1,
+                    )
+                    cv2.rectangle(color_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.circle(color_image, (cx, cy), 4, (0, 0, 255), -1)
 
-                txt = f"E:{error_val:.2f} D:{dist:.2f}m"
-                cv2.putText(
-                    color_image,
-                    txt,
-                    (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 0),
-                    1,
-                )
+                    txt = f"E:{error_val:.2f} D:{dist:.2f}m"
+                    cv2.putText(
+                        color_image,
+                        txt,
+                        (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        1,
+                    )
 
         self.pub_found.publish(found_msg)
 
     def destroy(self):
-        self.pipeline.stop()
-        cv2.destroyAllWindows()
+        if getattr(self, "pipeline_started", False):
+            self.pipeline.stop()
+        if getattr(self, "show_view", False):
+            cv2.destroyAllWindows()
 
 
 def main(args=None):
