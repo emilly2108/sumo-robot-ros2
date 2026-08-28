@@ -43,8 +43,6 @@ HFSM brain은 스위치가 켜지기 전에는 정지 명령을 유지합니다.
 - `motor_node.py`: `/cmd_vel`을 CANopen 모터 명령으로 변환
 - `switch_node.py`: GPIO 물리 스위치와 `switch_mode` 서비스 연결
 - `PROJECT_STATUS.html`: 파일별 역할, 토픽 흐름, 색상 패턴별 동작 정리
-- `brain_test_*.py`, `test_*.py`: 기능별 테스트 또는 이전 구현 참고 코드
-- `calibrate_center.py`, `center_calibration.py`, `center_calibration.json`: 카메라 중심 보정
 
 ## 준비 환경
 
@@ -84,10 +82,8 @@ ros2 topic echo /color_sensor
 ros2 topic echo /cmd_vel
 ```
 
-`test_code.py`, `test_code_hfsm.py` 등은 실제 모터를 직접 대신하는 통합 실행 파일이
-아니라 기능 확인과 이전 구조 비교를 위한 파일입니다. 실행 대상은 현재 채택한
-`hfsm_brain` 모듈이며, 모터를 연결하지 않은 상태에서 먼저 `/cmd_vel`을 확인해야
-합니다.
+실행 대상은 현재 채택한 `hfsm_brain` 모듈이며, 모터를 연결하지 않은 상태에서 먼저
+`/cmd_vel`을 확인해야 합니다.
 
 ## 주의
 
