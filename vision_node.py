@@ -21,8 +21,10 @@ class GreenTrackerDepth(Node):
 
         self.WIDTH = 424
         self.HEIGHT = 240
-        # 424x240 is already a low-resolution profile; 15 FPS reduces Pi load.
+        # 카메라 입력은 호환성이 좋은 15 FPS로 유지하고, 아래 처리 주기에서
+        # 오래된 프레임을 버리면서 실제 ROS 토픽 발행은 10 FPS로 제한한다.
         self.CAMERA_FPS = 15
+        self.PROCESS_FPS = 10
         self.CENTER_X = self.WIDTH // 2
         self.OFFSET_MM = 30
         self.WALL_CLOSE_DISTANCE = 0.20
@@ -59,7 +61,7 @@ class GreenTrackerDepth(Node):
 
         self.prev_dist = 0.0
         self.pipeline_started = True
-        self.timer = self.create_timer(1.0 / self.CAMERA_FPS, self.process_frame)
+        self.timer = self.create_timer(1.0 / self.PROCESS_FPS, self.process_frame)
 
     def process_frame(self):
         try:

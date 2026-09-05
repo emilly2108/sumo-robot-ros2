@@ -114,7 +114,8 @@ class SafeCanopenMotorNode(Node):
         # CAN 인터페이스 연결, SDO 응답 대기, 상태 조회 주기 관련 파라미터.
         self.declare_parameter("can_channel", "can0")
         self.declare_parameter("can_interface", "socketcan")
-        self.declare_parameter("can_period_sec", 0.02)
+        # 모터 4개와 SYNC를 초당 20회 전송해 CAN 송신 부담을 낮춘다.
+        self.declare_parameter("can_period_sec", 0.05)
         self.declare_parameter("sdo_timeout_sec", 0.25)
         self.declare_parameter("sdo_retries", 3)
         self.declare_parameter("status_poll_period_sec", 0.50)

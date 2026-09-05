@@ -1,5 +1,5 @@
 #############################################
-from ..helpers import green_follow_command
+from ..helpers import green_follow_command, green_sensor_follow_command
 from ..models import Action_Step, Brain_Config, Motion_Command, World_Model
 from .base import Action
 
@@ -37,8 +37,25 @@ class Green_Follow_Action(Action):
         return Action_Step(green_follow_command(world, self.config))
 
 
+class Green_Sensor_Follow_Action(Action):
+    """초록색이 보이고 센서 분기에서 계속 추격해야 할 때의 행동이다."""
+
+    name = "GREEN_SENSOR_FOLLOW"
+    locked = False
+
+    def __init__(self, config: Brain_Config):
+        self.config = config
+
+    def step(self, now: float, world: World_Model) -> Action_Step:
+        del now
+        if not world.target_found:
+            return Action_Step(Motion_Command(label="GREEN_SENSOR_LOST"), True)
+        return Action_Step(green_sensor_follow_command(world, self.config))
+
+
 class Far_Green_Turn_Action(Action):
     name = "FAR_GREEN_TURN_45"
+    interruptible_by_green = False
 
     # 회전 설정과 방향을 받아 내부 상태를 준비한다.
     def __init__(self, config: Brain_Config, direction: float = 1.0):

@@ -90,8 +90,8 @@ class Brain_Config:
     wall_close_distance: float = 0.20
     no_wall_distance: float = 9.9
 
-    # HFSM 제어 루프를 0.02초
-    control_period: float = 0.02
+    # HFSM 제어 루프를 0.05초로 실행해 /cmd_vel을 초당 20회 발행한다.
+    control_period: float = 0.05
     # 기준 거리 10cm
     short_distance: float = 0.10
     turn_45_duration: float = (math.pi / 4.0) / 0.8
