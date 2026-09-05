@@ -23,10 +23,12 @@ class Front_Color_Avoid_Action(Action):
         config: Brain_Config,
         color: Sensor_Color,
         first_side: Optional[Front_Side],
+        interruptible_by_green: bool = True,
     ):
         self.config = config
         self.color = color
         self.first_side = first_side
+        self.interruptible_by_green = interruptible_by_green
         self.phase = (
             Front_Color_Phase.BACK_UNTIL_CLEAR
             if first_side is None

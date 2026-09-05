@@ -23,14 +23,14 @@ class TCS3472ColorNode(Node):
         self.integration_time_ms = 10
         self.gain = 16
 
-        # 센서를 읽는 주기
-        self.loop_delay_sec = 0.05
+        # 센서를 읽고 /color_sensor를 발행하는 주기: 초당 10회
+        self.loop_delay_sec = 0.10
 
         # TCA 채널과 로봇에서의 센서 위치 매핑
         self.channel_config = {
             0: {
-                "position": "unused_ch0",
-                "enabled": False,
+                "position": "front_left",
+                "enabled": True,
             },
             1: {
                 "position": "front_right",
@@ -38,10 +38,6 @@ class TCS3472ColorNode(Node):
             },
             2: {
                 "position": "back",
-                "enabled": True,
-            },
-            3: {
-                "position": "front_left",
                 "enabled": True,
             },
         }
@@ -60,7 +56,7 @@ class TCS3472ColorNode(Node):
         # =========================
 
         # 바닥 색 인식 결과를 JSON 문자열로 publish
-        self.publisher = self.create_publisher(String, "/color_sensor", 10)
+        self.publisher = self.create_publisher(String, "/color_sensor", 1)
 
         # =========================
         # I2C / 센서 설정
@@ -124,30 +120,53 @@ class TCS3472ColorNode(Node):
         # 기본 바닥 또는 미분류 색상
         return "BLACK_OR_UNKNOWN"
 
+    def color_to_value(self, color_name):
+        """Brain이 사용하는 0=검정, 1=빨강, 2=파랑 값으로 바꾼다."""
+        if color_name == "RED":
+            return 1
+        if color_name == "BLUE":
+            return 2
+        return 0
+
     def timer_callback(self):
-        # 각 센서에서 raw 값을 한 번만 읽고 색을 판정한 뒤 publish
-        for channel, sensor in self.sensors.items():
+        # 세 센서 결과를 한 메시지에 묶어 발행한다. 큐가 1이어도 앞 센서 값이
+        # 뒤 센서 메시지에 밀려 사라지지 않도록 하기 위한 구조다.
+        sensor_values = {}
+        for channel, config in self.channel_config.items():
+            if not config["enabled"]:
+                continue
+
+            position = config["position"]
+            sensor = self.sensors.get(channel)
+            if sensor is None:
+                # 초기화에 실패한 센서는 검정으로 보내서 이전 색이 남지 않게 한다.
+                sensor_values[position] = 0
+                continue
+
             try:
                 r, g, b, c = sensor.color_raw
 
-                color = self.classify_color(r, g, b, c)
-                position = self.channel_config[channel]["position"]
-
-                # 토픽으로 보낼 최소 데이터 구성
-                data = {
-                    "position": position,
-                    "color": color,
-                }
-
-                msg = String()
-                msg.data = json.dumps(data)
-                self.publisher.publish(msg)
-
-                # 터미널에도 위치와 색만 출력
-                self.get_logger().info(f"{position}: {color}")
+                color_name = self.classify_color(r, g, b, c)
+                color_value = self.color_to_value(color_name)
+                sensor_values[position] = color_value
 
             except Exception as e:
                 self.get_logger().error(f"CH{channel}: read error: {e}")
+                # 읽기에 실패한 주기는 검정으로 보내 이전 색상 값이 남지 않게 한다.
+                sensor_values[position] = 0
+
+        if not sensor_values:
+            return
+
+        msg = String()
+        msg.data = json.dumps({"sensors": sensor_values})
+        self.publisher.publish(msg)
+        self.get_logger().info(
+            "colors: "
+            f"front_left={sensor_values.get('front_left', 0)} "
+            f"front_right={sensor_values.get('front_right', 0)} "
+            f"back={sensor_values.get('back', 0)}"
+        )
 
 
 def main(args=None):
