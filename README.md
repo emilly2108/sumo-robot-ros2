@@ -9,11 +9,23 @@ Intel RealSense D435i 비전 노드, TCS34725 컬러 센서 노드, CANopen 모�
 ```text
 vision_node.py  -> /target_error, /target_distance, /target_found
                 -> /wall_distance, /wall_left_distance, /wall_right_distance
+                -> /tilt_detected, /tilt_angle_deg (D435i IMU 테스트)
 color_node.py   -> /color_sensor
 switch_node.py  -> switch_mode 서비스 요청
 hfsm_brain      -> /cmd_vel
 motor_node.py   -> CANopen 모터 4개
 ```
+
+## IMU 기울기 테스트 상태
+
+`vision_node.py`는 D435i의 가속도계와 자이로를 읽어
+`/tilt_detected`, `/tilt_angle_deg`를 발행하며,
+`hfsm_brain/actions/tilt.py`는 기울기 각도가 15도 이상이면 제자리 회전을 선택합니다.
+
+현재 Raspberry Pi 5 환경에서는 컬러·깊이·자이로 스트림은 열리지만 가속도계 스트림이
+`Couldn't resolve requests`로 열리지 않아, 이 기능은 테스트 상태입니다. 가속도계가 열리지
+않으면 비전 노드가 시작되지 않으므로, 초록색·벽 시험을 우선할 때는 IMU 요청을 별도로
+비활성화해야 합니다. 가속도계와 자이로가 모두 열리는 환경에서만 기울기 기능을 사용합니다.
 
 HFSM brain은 스위치가 켜지기 전에는 정지 명령을 유지합니다. 스위치가 켜진 뒤에는
 벽 회피를 먼저 판단하고, 벽이 없으면 초록색 추격, 컬러 센서 패턴 행동, 기본 주행

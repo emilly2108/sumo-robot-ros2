@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""SteadyWin 드라이버 4개를 CANopen으로 제어하는 ROS 2 모터 노드.
-
-로봇이 언제 움직일지는 브레인 노드가 판단하고 /cmd_vel을 발행한다. 이 노드는
-그 명령을 모터별 목표 속도로 변환하고, CANopen 설정 응답 확인, fault 고정,
-hard stop, 정상 종료 시 토크 해제를 담당한다.
-
-주의 사항
----------
-* 이 코드에서는 RPDO3 매핑을 바꾸지 않는다. EDS/오브젝트 딕셔너리로 실제
-  드라이버 매핑을 확인하기 전에는 0x1602 매핑을 수정하면 안 된다.
-* Twist 속도 0은 토크를 유지하는 일반 정지이며, 토크 해제가 아니다.
-* SIGKILL이나 전원 차단 시에는 종료 절차가 실행될 수 없다. 물리 E-stop과
-  watchdog 같은 하드웨어 안전장치는 별도로 필요하다.
-"""
-
 from __future__ import annotations
 
 import json

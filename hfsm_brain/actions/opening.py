@@ -11,18 +11,22 @@ from ..models import (
 from .base import Action
 
 class Opening_Phase(Enum):
+    # 스위치를 켠 직후 반드시 수행할 약 45도 좌회전 단계다.
     TURN_LEFT_45 = auto()
+    # 회전 후 목표·벽·앞 색상 조건을 만날 때까지 직진하는 단계다.
     GO_STRAIGHT = auto()
 
 class Opening_Action(Action):
     name = "OPENING"
 
     def __init__(self, config: Brain_Config):
+        # 회전 시간·속도와 직진 속도를 읽을 공통 설정을 저장한다.
         self.config = config
         self.phase = Opening_Phase.TURN_LEFT_45
         self.started_at = 0.0
 
     def enter(self, now: float, world: World_Model) -> None:
+        # 행동 재진입 때마다 첫 회전부터 다시 시작하고 시작 시각을 기록한다.
         del world
         self.phase = Opening_Phase.TURN_LEFT_45
         self.started_at = now
@@ -42,6 +46,7 @@ class Opening_Action(Action):
                         "OPENING_TURN_LEFT_45",
                     )
                 )
+            # 정해진 회전 시간이 끝나면 다음 제어 주기부터 직진 단계로 바꾼다.
             self.phase = Opening_Phase.GO_STRAIGHT
             self.started_at = now
 

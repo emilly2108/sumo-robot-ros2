@@ -1,4 +1,6 @@
 #############################################
+from enum import Enum, auto
+
 from ..helpers import green_follow_command, green_sensor_follow_command
 from ..models import Action_Step, Brain_Config, Motion_Command, World_Model
 from .base import Action
@@ -43,14 +45,33 @@ class Green_Sensor_Follow_Action(Action):
     name = "GREEN_SENSOR_FOLLOW"
     locked = False
 
-    def __init__(self, config: Brain_Config):
+    def __init__(self, config: Brain_Config, force_max_speed: bool = False):
+        # 행동 공통 속도 설정과 강제 최대 속도 옵션을 보관한다.
         self.config = config
+        self.force_max_speed = force_max_speed
+
+    def key(self):
+        # 같은 클래스라도 강제 최대 속도 여부가 다르면 다른 행동으로 취급한다.
+        return (type(self), self.force_max_speed)
 
     def step(self, now: float, world: World_Model) -> Action_Step:
+        # 이번 판단에는 시간보다 최신 목표·센서 상태만 필요하다.
         del now
         if not world.target_found:
             return Action_Step(Motion_Command(label="GREEN_SENSOR_LOST"), True)
-        return Action_Step(green_sensor_follow_command(world, self.config))
+        return Action_Step(
+            green_sensor_follow_command(
+                world,
+                self.config,
+                force_max_speed=self.force_max_speed,
+            )
+        )
+
+class Far_Green_Phase(Enum):
+    # 먼 목표 쪽으로 먼저 고정된 45도 좌회전을 수행하는 단계다.
+    TURN_LEFT_45 = auto()
+    # 회전 뒤 10 cm만 직진해 시야와 위치를 바꾸는 단계다.
+    FORWARD_SHORT = auto()
 
 
 class Far_Green_Turn_Action(Action):
@@ -65,6 +86,7 @@ class Far_Green_Turn_Action(Action):
         self.direction = direction
         # 행동 진입 전에는 시작 시각을 0으로 둔다.
         self.started_at = 0.0
+        self.phase = Far_Green_Phase.TURN_LEFT_45
 
     # 같은 클래스라도 회전 방향이 다르면 다른 행동으로 구분한다.
     def key(self):
@@ -73,32 +95,51 @@ class Far_Green_Turn_Action(Action):
 
     # 행동으로 전환된 순간 회전 기준 시각을 기록한다.
     def enter(self, now: float, world: World_Model) -> None:
+        # 이 행동은 중간에 목표 방향을 다시 읽지 않으므로 World Model은 쓰지 않는다.
         del world
+        self.phase = Far_Green_Phase.TURN_LEFT_45
         self.started_at = now
 
     # 경과 시간으로 45도 회전의 진행과 종료를 결정한다.
     def step(self, now: float, world: World_Model) -> Action_Step:
-        # 이 행동은 시작할 때 정해진 방향만 사용하므로 World Model을 사용하지 않는다.
+        # This action uses its stored phases instead of changing direction from
+        # the latest target observation while it is in progress.
         del world
-        # 설정된 45도 회전 시간이 모두 지났는지 확인한다.
-        if now - self.started_at >= self.config.turn_45_duration:
-            # 회전 행동을 종료해 다음 제어 행동으로 넘어가게 한다.
-            return Action_Step(Motion_Command(label="FAR_GREEN_TURN_DONE"), True)
-        # 시간이 남아 있으면 선속도 0으로 제자리 회전을 계속한다.
-        return Action_Step(
-            Motion_Command(
-                0.0,
-                self.direction * self.config.turn_speed,
-                False,
-                "FAR_GREEN_TURN_45",
+        if self.phase == Far_Green_Phase.TURN_LEFT_45:
+            if now - self.started_at < self.config.turn_45_duration:
+                return Action_Step(
+                    Motion_Command(
+                        0.0,
+                        self.direction * self.config.turn_speed,
+                        False,
+                        "FAR_GREEN_TURN_45",
+                    )
+                )
+            self.phase = Far_Green_Phase.FORWARD_SHORT
+            # 회전이 끝난 시각부터 짧은 직진 시간을 새로 잰다.
+            self.started_at = now
+
+        # 설정된 10 cm를 기본 속도로 갈 때 필요한 시간을 계산한다.
+        forward_duration = self.config.short_distance / self.config.base_speed
+        # 짧은 전진이 끝나기 전에는 방향 보정 없이 직진한다.
+        if now - self.started_at < forward_duration:
+            return Action_Step(
+                Motion_Command(
+                    self.config.base_speed,
+                    0.0,
+                    False,
+                    "FAR_GREEN_FORWARD_SHORT",
+                )
             )
-        )
+
+        # 회전과 짧은 전진이 모두 끝나면 다음 일반 추격 판단을 허용한다.
+        return Action_Step(Motion_Command(label="FAR_GREEN_TURN_DONE"), True)
 
 
 class Wall_Avoid_Action(Action):
     name = "WALL_AVOID"
-    # 벽 회피 90도 회전 중에는 초록색이 보여도 회전을 끝까지 수행한다.
-    interruptible_by_green = False
+    # 초록색이 보이면 벽 판단을 끄고 초록색 추격으로 즉시 전환한다.
+    interruptible_by_green = True
 
     def __init__(self, config: Brain_Config, direction: float):
         # 90도 회전 시간과 회전 속도가 들어 있는 설정이다.

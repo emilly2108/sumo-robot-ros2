@@ -4,12 +4,17 @@ from enum import Enum, IntEnum, auto
 
 
 class Sensor_Color(IntEnum):
+    # 색을 감지하지 않았거나 불명확한 바닥 상태를 뜻한다.
     BLACK = 0
+    # 빨간 바닥 색을 뜻한다.
     RED = 1
+    # 파란 바닥 색을 뜻한다.
     BLUE = 2
 
 class Sensor_Event(Enum):
+    # 패턴표에 없는 색 조합으로, 전용 행동을 선택하지 않는 상태다.
     UNKNOWN = auto()
+    # 세 센서가 모두 검정인 기본 주행 상태다.
     NONE = auto()
     FRONT_RIGHT_RED = auto()
     FRONT_LEFT_RED = auto()
@@ -50,11 +55,19 @@ SENSOR_EVENTS = {
 
 @dataclass
 class World_Model:
+    # 카메라가 계산한 목표의 좌우 정규화 오차다.
     target_error: float = 0.0
+    # 카메라가 계산한 목표까지의 거리이며 9.9는 목표 없음의 관례값이다.
     target_distance: float = 9.9
     target_found: bool = False
     target_missing_frames: int = 0
 
+    # vision_node.py의 IMU 필터가 계산해 전달한 연속 기울기 각도다.
+    tilt_angle_deg: float = 0.0
+    # 시간·각도 조건까지 만족해 확정된 기울기 안전 상태다.
+    tilt_detected: bool = False
+
+    # 전체·좌·우 벽 거리는 비전 노드가 미터 단위로 갱신한다.
     wall_distance: float = 9.9
     wall_left_distance: float = 9.9
     wall_right_distance: float = 9.9
@@ -75,17 +88,20 @@ class World_Model:
 
 @dataclass(frozen=True)
 class Brain_Config:
+    # 평상시 순항, 목표 추격, 근거리 전투, 최대, 후진 선속도다.
     base_speed: float = 0.6
     chase_speed: float = 0.7
     battle_speed: float = 0.8
-    max_speed: float = 0.8
+    max_speed: float = 1.0
     reverse_speed: float = -0.6
 
+    # 허용할 최대 각속도와 고정 회전 행동 속도다.
     max_angular_speed: float = 2.0
     turn_speed: float = 0.8
     kp: float = 1.8
     deadzone: float = 0.03
 
+    # 목표가 가깝다고 보는 거리와 벽 회피를 시작할 거리다.
     opponent_close_distance: float = 0.50
     wall_close_distance: float = 0.20
     no_wall_distance: float = 9.9
@@ -108,11 +124,15 @@ class Motion_Command:
     linear: float = 0.0
     # Twist.angular.z에 들어갈 왼쪽 또는 오른쪽 회전 속도
     angular: float = 0.0
+    # True이면 Brain은 현재 구현에서 0 Twist를 반복 발행한다.
     hard_stop: bool = False
+    # 행동·속도 상태를 사람이 식별할 수 있는 로그용 이름이다.
     label: str = "STOP"
 
 
 @dataclass(frozen=True)
 class Action_Step:
+    # 이번 제어 주기에 실제 발행할 속도 또는 정지 명령이다.
     command: Motion_Command
+    # True이면 node.py가 즉시 다음 행동을 다시 선택한다.
     finished: bool = False

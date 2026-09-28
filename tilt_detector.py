@@ -1,15 +1,3 @@
-"""D435i IMU용 충격 내성 기울기 판정기.
-
-이 모듈은 ROS나 RealSense SDK에 의존하지 않는다.  따라서 기록한 IMU 로그나
-``test_tilt_detector.py``로 먼저 검증할 수 있다. 입력 가속도는 m/s², 자이로는
-rad/s, 타임스탬프는 초 단위여야 한다.
-
-기준 자세는 시작 직후 안정적인 가속도 샘플로 잡는다. 충격으로 가속도 크기가
-1 g에서 크게 벗어나면 가속도 보정과 15도 판정을 잠시 중지한다. 그 사이에는
-자이로로만 중력 방향을 예측하므로, 1 cm 턱이나 충돌의 짧은 가속도를 기울기로
-잘못 판정하지 않는다.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,12 +11,6 @@ STANDARD_GRAVITY = 9.80665
 
 @dataclass(frozen=True)
 class TiltStatus:
-    """현재 기울기 상태.
-
-    ``angle_deg``는 기준 자세에서 벗어난 전체 기울기(pitch/roll 결합)다.
-    yaw 회전은 중력 방향을 바꾸지 않으므로 이 값에 영향을 주지 않는다.
-    """
-
     ready: bool
     angle_deg: float
     tilted: bool
@@ -38,18 +20,14 @@ class TiltStatus:
 
 
 class TiltDetector:
-    """자이로 예측 + 가속도 보정 방식의 pitch/roll 임계값 판정기."""
 
     def __init__(
         self,
-        threshold_deg: float = 15.0,
-        release_deg: float = 12.0,
-        confirm_time_sec: float = 0.25,
-        release_time_sec: float = 0.25,
-        impact_hold_sec: float = 0.30,
-        accel_norm_tolerance_g: float = 0.20,
-        accel_correction_time_sec: float = 0.20,
-        calibration_samples: int = 50,
+        threshold_deg: float = 15.0,  # 기울어짐을 시작으로 판정할 각도
+        release_deg: float = 12.0,  # 기울어짐 판정을 해제할 더 낮은 각도
+        confirm_time_sec: float = 0.25,  # 임계각 이상이 계속돼야 하는 시간
+        release_time_sec: float = 0.25,  # 해제각 이하가 계속돼야 하는 시간이
+        calibration_samples: int = 50,  # 기준 자세 평균에 사용할 정상 가속도 샘플 수
     ) -> None:
         if threshold_deg <= 0.0:
             raise ValueError("threshold_deg must be positive")
@@ -62,23 +40,32 @@ class TiltDetector:
         self.release_deg = release_deg
         self.confirm_time_sec = confirm_time_sec
         self.release_time_sec = release_time_sec
-        self.impact_hold_sec = impact_hold_sec
-        self.accel_norm_tolerance = accel_norm_tolerance_g * STANDARD_GRAVITY
-        self.accel_correction_time_sec = accel_correction_time_sec
         self.calibration_samples = calibration_samples
 
         self._reference_gravity: Optional[Vector3] = None
+        # 자이로 예측과 가속도 보정을 합친 현재 단위 중력 방향 추정값
         self._gravity_estimate: Optional[Vector3] = None
+        # 초기 보정 동안 받은 단위 중력 방향들의 누적합
         self._calibration_sum: Vector3 = (0.0, 0.0, 0.0)
+        # 초기 보정에 실제로 더한 정상 샘플 수
         self._calibration_count = 0
+        # 가속도계 샘플의 시간 역행과 보정 간격 계산을 위한 마지막 시각
         self._last_accel_timestamp: Optional[float] = None
+        # 자이로 샘플의 시간 역행과 적분 간격 계산을 위한 마지막 시각
         self._last_gyro_timestamp: Optional[float] = None
+        # status()가 시각을 받지 않았을 때 사용할 가장 최근 IMU 샘플 시각
         self._last_timestamp: Optional[float] = None
+        # 이 시각 전까지는 충격 중이므로 기울기 상태를 새로 전환하지 않음
         self._impact_until = float("-inf")
+        # 임계각 이상이 처음 이어지기 시작한 시각
         self._above_since: Optional[float] = None
+        # 해제각 이하가 처음 이어지기 시작한 시각
         self._below_since: Optional[float] = None
+        # 시간 조건까지 충족해 확정된 현재 기울어짐 상태
         self._tilted = False
+        # 기준 중력 방향과 추정 중력 방향의 현재 각도
         self._angle_deg = 0.0
+        # status() 호출자에게 초기 보정 완료 직후 한 번만 알릴 표시
         self._just_calibrated = False
 
     @property
@@ -87,6 +74,7 @@ class TiltDetector:
 
     @staticmethod
     def _add(left: Vector3, right: Vector3) -> Vector3:
+        # 두 3차원 벡터의 같은 축 성분을 더해 새 벡터를 만든다.
         return (left[0] + right[0], left[1] + right[1], left[2] + right[2])
 
     @staticmethod
@@ -95,10 +83,12 @@ class TiltDetector:
 
     @staticmethod
     def _dot(left: Vector3, right: Vector3) -> float:
+        # 내적구하기
         return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 
     @staticmethod
     def _cross(left: Vector3, right: Vector3) -> Vector3:
+        # 외적구하기
         return (
             left[1] * right[2] - left[2] * right[1],
             left[2] * right[0] - left[0] * right[2],
@@ -106,6 +96,7 @@ class TiltDetector:
         )
 
     @classmethod
+    #자이로 측정 함수
     def _normalize(cls, vector: Vector3) -> Optional[Vector3]:
         length_sq = cls._dot(vector, vector)
         if length_sq <= 1e-12:
@@ -113,11 +104,6 @@ class TiltDetector:
         return cls._scale(vector, 1.0 / math.sqrt(length_sq))
 
     def update_gyro(self, gyro_rad_s: Vector3, timestamp_sec: float) -> TiltStatus:
-        """새 자이로 샘플을 반영한다.
-
-        월드에 고정된 중력 벡터를 현재 센서 좌표계로 적분한다. 샘플 간격이 너무
-        길면 충격 뒤의 큰 오차를 막기 위해 적분하지 않고 다음 가속도 보정을 기다린다.
-        """
         self._just_calibrated = False
         self._last_timestamp = timestamp_sec
 
@@ -127,7 +113,6 @@ class TiltDetector:
         if self._gravity_estimate is not None and self._last_gyro_timestamp is not None:
             dt = timestamp_sec - self._last_gyro_timestamp
             if 0.0 < dt <= 0.10:
-                # d(g_body)/dt = -omega_body x g_body
                 derivative = self._scale(self._cross(gyro_rad_s, self._gravity_estimate), -1.0)
                 predicted = self._add(self._gravity_estimate, self._scale(derivative, dt))
                 normalized = self._normalize(predicted)
@@ -139,7 +124,6 @@ class TiltDetector:
         return self.status(timestamp_sec)
 
     def update_accel(self, accel_m_s2: Vector3, timestamp_sec: float) -> TiltStatus:
-        """새 가속도계 샘플을 반영한다."""
         self._just_calibrated = False
         self._last_timestamp = timestamp_sec
 
@@ -147,14 +131,13 @@ class TiltDetector:
             return self.status(timestamp_sec)
 
         norm = math.sqrt(self._dot(accel_m_s2, accel_m_s2))
-        if abs(norm - STANDARD_GRAVITY) > self.accel_norm_tolerance:
-            # 충격 또는 큰 선형 가속도: 중력 방향 보정·새 기울기 판정 금지.
-            self._impact_until = max(self._impact_until, timestamp_sec + self.impact_hold_sec)
+        if abs(norm - STANDARD_GRAVITY) > 0.20 * STANDARD_GRAVITY:
+            self._impact_until = max(self._impact_until, timestamp_sec + 0.30)
             return self.status(timestamp_sec)
 
         measured_gravity = self._normalize(accel_m_s2)
         if measured_gravity is None:
-            self._impact_until = max(self._impact_until, timestamp_sec + self.impact_hold_sec)
+            self._impact_until = max(self._impact_until, timestamp_sec + 0.30)
             return self.status(timestamp_sec)
 
         if not self.ready:
@@ -174,7 +157,7 @@ class TiltDetector:
             alpha = 1.0
         else:
             dt = max(0.0, timestamp_sec - self._last_accel_timestamp)
-            alpha = 1.0 - math.exp(-dt / self.accel_correction_time_sec)
+            alpha = 1.0 - math.exp(-dt / 0.20)
             alpha = min(max(alpha, 0.0), 1.0)
 
         estimate = self._gravity_estimate or measured_gravity
@@ -196,7 +179,6 @@ class TiltDetector:
         cosine = min(1.0, max(-1.0, self._dot(self._gravity_estimate, self._reference_gravity)))
         self._angle_deg = math.degrees(math.acos(cosine))
 
-        # 충격 유지 시간에는 상태 전환을 하지 않는다. 이미 검출된 기울기는 유지한다.
         if timestamp_sec < self._impact_until:
             self._above_since = None
             self._below_since = None
@@ -214,7 +196,6 @@ class TiltDetector:
                 self._above_since = None
             return
 
-        # 이미 검출된 상태는 release_deg 아래가 일정 시간 유지될 때만 해제한다.
         self._above_since = None
         if self._angle_deg <= self.release_deg:
             if self._below_since is None:
@@ -226,7 +207,6 @@ class TiltDetector:
             self._below_since = None
 
     def status(self, timestamp_sec: Optional[float] = None) -> TiltStatus:
-        """현재 상태를 반환한다. 기준 자세 전에는 ``ready``가 False다."""
         if timestamp_sec is None:
             timestamp_sec = self._last_timestamp
         if timestamp_sec is None:
@@ -242,4 +222,3 @@ class TiltDetector:
             calibration_progress=progress,
             just_calibrated=self._just_calibrated,
         )
-
