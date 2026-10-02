@@ -5,7 +5,6 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32
 from center_calibration import calibrated_center_x, load_calibration
-from tilt_detector import TiltDetector
 
 
 class GreenTrackerDepth(Node):
@@ -18,8 +17,6 @@ class GreenTrackerDepth(Node):
         self.pub_wall_distance = self.create_publisher(Float32, '/wall_distance', 10)
         self.pub_wall_left = self.create_publisher(Float32, '/wall_left_distance', 10)
         self.pub_wall_right = self.create_publisher(Float32, '/wall_right_distance', 10)
-        self.pub_tilt_detected = self.create_publisher(Bool, '/tilt_detected', 1)
-        self.pub_tilt_angle = self.create_publisher(Float32, '/tilt_angle_deg', 1)
 
         # 컬러·깊이 영상을 처리할 고정 해상도와 보정 실패 시 사용할 화면 중앙
         self.WIDTH = 424
@@ -35,15 +32,10 @@ class GreenTrackerDepth(Node):
 
         self.pipeline = rs.pipeline()
         config = rs.config()
-        # 가속도·자이로 융합과 임계값 판정을 담당하는 순수 Python 필터
-        self.tilt_detector = TiltDetector()
 
         # 같은 시야의 컬러와 깊이를 초당 30장씩 요청
         config.enable_stream(rs.stream.color, self.WIDTH, self.HEIGHT, rs.format.bgr8, 30)
         config.enable_stream(rs.stream.depth, self.WIDTH, self.HEIGHT, rs.format.z16, 30)
-        # D435i 가속도계와 자이로 원시 스트림을 함께 요청
-        config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 63)
-        config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f, 200)
 
         try:
             profile = self.pipeline.start(config)
@@ -76,7 +68,6 @@ class GreenTrackerDepth(Node):
     def process_frame(self):
         try:
             frames = self.pipeline.wait_for_frames()
-            self.publish_tilt_info(frames)
             aligned_frames = self.align.process(frames)
             depth_frame = aligned_frames.get_depth_frame()
             color_frame = aligned_frames.get_color_frame()
@@ -96,30 +87,6 @@ class GreenTrackerDepth(Node):
 
         except Exception as e:
             self.get_logger().error(f'Frame error: {e}')
-
-    def publish_tilt_info(self, frames):
-        samples = []
-
-        gyro_frame = frames.first_or_default(rs.stream.gyro)
-        if gyro_frame:
-            gyro = gyro_frame.as_motion_frame().get_motion_data()
-            samples.append((gyro_frame.get_timestamp() / 1000.0, 'gyro', gyro))
-
-        accel_frame = frames.first_or_default(rs.stream.accel)
-        if accel_frame:
-            accel = accel_frame.as_motion_frame().get_motion_data()
-            samples.append((accel_frame.get_timestamp() / 1000.0, 'accel', accel))
-
-        status = self.tilt_detector.status()
-        for timestamp, stream_name, motion in sorted(samples, key=lambda sample: sample[0]):
-            values = (motion.x, motion.y, motion.z)
-            if stream_name == 'gyro':
-                status = self.tilt_detector.update_gyro(values, timestamp)
-            else:
-                status = self.tilt_detector.update_accel(values, timestamp)
-
-        self.pub_tilt_angle.publish(Float32(data=float(status.angle_deg)))
-        self.pub_tilt_detected.publish(Bool(data=bool(status.tilted)))
 
     def make_green_mask(self, color_image):
         hsv = cv2.cvtColor(color_image, cv2.COLOR_BGR2HSV)

@@ -20,7 +20,6 @@ from .actions import (
     Green_Sensor_Follow_Action,
     Opening_Action,
     Back_Single_Boost_Action,
-    Tilt_Turn_Action,
     Wall_Avoid_Action,
 )
 from .helpers import now_seconds, wall_avoid_direction
@@ -55,8 +54,6 @@ class Hfsm_Brain_Node(Node):
             Float32, "/target_distance", self.target_distance_callback, 1
         )
         self.create_subscription(Bool, "/target_found", self.target_found_callback, 1)
-        self.create_subscription(Bool, "/tilt_detected", self.tilt_detected_callback, 1)
-        self.create_subscription(Float32, "/tilt_angle_deg", self.tilt_angle_callback, 1)
         self.create_subscription(
             Float32, "/wall_distance", self.wall_distance_callback, 1
         )
@@ -85,12 +82,6 @@ class Hfsm_Brain_Node(Node):
             return
 
         self.world.target_missing_frames += 1
-
-    def tilt_detected_callback(self, msg: Bool) -> None:
-        self.world.tilt_detected = bool(msg.data)
-
-    def tilt_angle_callback(self, msg: Float32) -> None:
-        self.world.tilt_angle_deg = float(msg.data)
 
     def wall_distance_callback(self, msg: Float32) -> None:
         self.world.wall_distance = float(msg.data)
@@ -293,10 +284,6 @@ class Hfsm_Brain_Node(Node):
         self.get_logger().info(f"HFSM: {old_name} -> {self.active_action.name}")
 
     def choose_action(self) -> Action:
-        # 확정된 IMU 기울기는 초록·벽·색상보다 우선하는 회전 복구 행동을 선택한다.
-        if self.world.tilt_detected:
-            return Tilt_Turn_Action(self.config)
-
         # 목표가 보이면 벽 판단을 끈 상태로 초록+색상 세부 규칙을 적용한다.
         if self.world.target_found:
             return self.choose_green_action()
@@ -309,9 +296,13 @@ class Hfsm_Brain_Node(Node):
 
         event = self.world.sensor_event
         if event == Sensor_Event.FRONT_BOTH_RED:
-            return Front_Color_Avoid_Action(self.config, Sensor_Color.RED, None)
+            return Front_Color_Avoid_Action(
+                self.config, Sensor_Color.RED, None, turn_degrees=90
+            )
         if event == Sensor_Event.FRONT_BOTH_BLUE:
-            return Front_Color_Avoid_Action(self.config, Sensor_Color.BLUE, None)
+            return Front_Color_Avoid_Action(
+                self.config, Sensor_Color.BLUE, None, turn_degrees=90
+            )
         if event in (Sensor_Event.BACK_RED, Sensor_Event.BACK_BLUE):
             return Back_Single_Boost_Action(self.config, event)
         if event == Sensor_Event.ALL_RED:
@@ -367,23 +358,20 @@ class Hfsm_Brain_Node(Node):
             return Green_Follow_Action(self.config)
 
         # 초록색이 40cm 이내이고 앞 양쪽이 빨강이면, 빨강이 사라질 때까지
-        # 후진한 뒤 초록색이 계속 가까우면 멈춰 있는 전용 행동을 사용한다.
+        # 후진한 뒤 일반 초록색 추격으로 돌아가는 전용 행동을 사용한다.
         if event == Sensor_Event.FRONT_BOTH_RED:
             if 0.0 < distance <= 0.40:
                 return Green_Close_Front_Red_Action(self.config)
-            if green_far:
-                if not self.far_green_turn_done:
-                    return Far_Green_Turn_Action(self.config)
-                return Green_Follow_Action(self.config)
             return Front_Color_Avoid_Action(
                 self.config,
                 Sensor_Color.RED,
                 None,
                 interruptible_by_green=False,
+                turn_degrees=90,
             )
 
         # 앞 양쪽 파랑도 빨강과 같이 40cm 이내에서는 파랑이 사라질 때까지
-        # 후진하고, 파랑이 사라져도 초록색이 가까우면 그대로 멈춰 있다.
+        # 후진하고, 파랑이 사라지면 초록색 추격으로 돌아간다.
         if event == Sensor_Event.FRONT_BOTH_BLUE:
             if 0.0 < distance <= 0.40:
                 return Green_Close_Front_Color_Action(
@@ -482,13 +470,9 @@ class Hfsm_Brain_Node(Node):
             )
             return
 
-        # 새 기울기 확정 시 진행 중 행동을 취소하고 기울기 회전 행동으로 즉시 교체한다.
-        if self.world.tilt_detected and not isinstance(self.active_action, Tilt_Turn_Action):
-            self.transition_to(Tilt_Turn_Action(self.config), now, cancelled=True)
-
-        # 초록색이 보이는 동안에는 벽 거리를 없는 것으로 취급한다.[초록 또는 기울기가 있으면 벽 회피 판단을 비활성화할 기본값]
+        # 초록색이 보이는 동안에는 벽 거리를 없는 것으로 취급한다.
         wall_direction = None
-        if not self.world.target_found and not self.world.tilt_detected:
+        if not self.world.target_found:
             wall_direction = wall_avoid_direction(self.world, self.config)
         if (
             wall_direction is not None
@@ -511,10 +495,13 @@ class Hfsm_Brain_Node(Node):
         )
         if (
             self.world.target_found
-            and not self.world.tilt_detected
             and wall_direction is None
             and front_both_color
             and not isinstance(self.active_action, Wall_Avoid_Action)
+            and not (
+                isinstance(self.active_action, Front_Color_Avoid_Action)
+                and not self.active_action.can_interrupt_for_green()
+            )
             and not opening_turning
         ):
             self.transition_to(self.choose_green_action(), now, cancelled=True)
@@ -523,7 +510,6 @@ class Hfsm_Brain_Node(Node):
             self.active_action.locked
             and self.active_action.can_interrupt_for_green()
             and self.world.target_found
-            and not self.world.tilt_detected
             and wall_direction is None
             # 이미 일반 초록색 추격 중인 행동은 아래의 unlocked 재선택으로 처리한다.
             and not isinstance(self.active_action, Green_Follow_Action)
@@ -550,6 +536,13 @@ class Hfsm_Brain_Node(Node):
 
             if isinstance(self.active_action, Opening_Action):
                 self.opening_done = True
+            if (
+                isinstance(self.active_action, Front_Color_Avoid_Action)
+                and self.active_action.color == Sensor_Color.RED
+                and self.world.target_found
+            ):
+                # 앞 빨강 회피 회전이 끝났으면 같은 목표에 먼 목표용 회전을 다시 하지 않는다.
+                self.far_green_turn_done = True
             # 방금 완료된 행동이 먼 초록색용 45도 회전인지 확인한다.
             if isinstance(self.active_action, Far_Green_Turn_Action):
                 # 같은 초록색 목표에서 이 회전이 반복되지 않도록 완료 기록을 남긴다.

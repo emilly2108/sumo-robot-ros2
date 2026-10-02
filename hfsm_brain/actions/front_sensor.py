@@ -24,11 +24,13 @@ class Front_Color_Avoid_Action(Action):
         color: Sensor_Color,
         first_side: Optional[Front_Side],
         interruptible_by_green: bool = True,
+        turn_degrees: int = 45,
     ):
         self.config = config
         self.color = color
         self.first_side = first_side
         self.interruptible_by_green = interruptible_by_green
+        self.turn_degrees = turn_degrees
         self.phase = (
             Front_Color_Phase.BACK_UNTIL_CLEAR
             if first_side is None
@@ -38,7 +40,7 @@ class Front_Color_Avoid_Action(Action):
         self.started_at = 0.0
 
     def key(self):
-        return (type(self), self.color, self.first_side)
+        return (type(self), self.color, self.first_side, self.turn_degrees, self.interruptible_by_green)
 
     def enter(self, now: float, world: World_Model) -> None:
         # 한쪽부터 감지했다면 직진 단계, 양쪽 감지로 시작하면 후진 단계다.
@@ -141,15 +143,19 @@ class Front_Color_Avoid_Action(Action):
                         f"FRONT_{self.color.name}_BACK_UNTIL_CLEAR",
                     )
                 )
-            # 양쪽 센서가 모두 검정이 됐으므로 나중 감지 방향 45도 회전 단계로 간다.
+            # 양쪽 센서가 모두 검정이 됐으므로 나중 감지 방향 회전 단계로 간다.
             self.phase = Front_Color_Phase.TURN_TO_LATER_SIDE
-            # 45도 회전 시간을 측정할 기준 시각을 현재 시간으로 저장한다.
+            # 회전 시간을 측정할 기준 시각을 현재 시간으로 저장한다.
             self.started_at = now
 
-        # 나중에 같은 색을 감지했던 센서 쪽으로 45도 회전하는 단계다.
+        # 나중에 같은 색을 감지했던 센서 쪽으로 지정한 각도만큼 회전한다.
         if self.phase == Front_Color_Phase.TURN_TO_LATER_SIDE:
-            # 설정된 45도 회전 시간이 아직 남았는지 확인한다.
-            if now - self.started_at < self.config.turn_45_duration:
+            duration = (
+                self.config.turn_90_duration
+                if self.turn_degrees == 90
+                else self.config.turn_45_duration
+            )
+            if now - self.started_at < duration:
                 # 로그에 표시할 실제 왼쪽 또는 오른쪽 회전 이름을 만든다.
                 side = "LEFT" if self.turn_direction > 0.0 else "RIGHT"
                 # 선속도 0으로 제자리에서 나중 감지 방향으로 회전한다.
@@ -158,7 +164,7 @@ class Front_Color_Avoid_Action(Action):
                         0.0,
                         self.turn_direction * self.config.turn_speed,
                         False,
-                        f"FRONT_{self.color.name}_TURN_{side}_45",
+                        f"FRONT_{self.color.name}_TURN_{side}_{self.turn_degrees}",
                     )
                 )
             # 45도 회전이 끝났으므로 행동을 종료해 일반 직진 판단으로 넘어간다.

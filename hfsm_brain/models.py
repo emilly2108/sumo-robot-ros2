@@ -62,11 +62,6 @@ class World_Model:
     target_found: bool = False
     target_missing_frames: int = 0
 
-    # vision_node.py의 IMU 필터가 계산해 전달한 연속 기울기 각도다.
-    tilt_angle_deg: float = 0.0
-    # 시간·각도 조건까지 만족해 확정된 기울기 안전 상태다.
-    tilt_detected: bool = False
-
     # 전체·좌·우 벽 거리는 비전 노드가 미터 단위로 갱신한다.
     wall_distance: float = 9.9
     wall_left_distance: float = 9.9

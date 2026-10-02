@@ -57,6 +57,17 @@
   <p class="lead">작성 기준: 현재 코드 폴더의 파일을 기준으로 정리한 문서입니다. 하드웨어를 이 환경에서 직접 실행한 결과가 아니라, 소스 구조와 ROS2 연결을 기준으로 판단했습니다.</p>
 
   <div class="log-entry">
+    <h3>[2026-10-03 00:43] 공중 테스트 확인 완료</h3>
+    <p><strong>변경 유형:</strong> fix</p>
+    <ul>
+      <li><code>hfsm_brain/actions/front_sensor.py</code>, <code>hfsm_brain/node.py</code>: 앞 양쪽에 같은 빨강 또는 파랑이 감지되면 양쪽 검정까지 후진한 뒤 나중 감지된 쪽으로 90도 회전하도록 수정했습니다. 초록색이 보이고 앞 양쪽 빨강이 감지된 경우에도 거리가 400mm를 넘으면 같은 회피 행동을 선택합니다.</li>
+      <li><code>hfsm_brain/actions/green_sensor.py</code>: 가까운 초록색과 앞 빨강 회피 후 빨강이 사라지면 정지 유지 대신 초록색 추격으로 복귀합니다.</li>
+      <li><code>vision_node.py</code>, <code>hfsm_brain/node.py</code>, <code>hfsm_brain/models.py</code>, <code>hfsm_brain/actions/</code>: Raspberry Pi에서 열리지 않던 D435i IMU 스트림·구독·행동을 제거했습니다.</li>
+      <li>코드와 문서를 갱신했습니다. 이 기록은 코드 상태이며, 실제 로봇 동작 검증을 의미하지 않습니다.</li>
+    </ul>
+  </div>
+
+  <div class="log-entry">
     <h3>[2026-09-28 22:05] IMU 포함된 테스트 버전</h3>
     <p><strong>변경 유형:</strong> feat</p>
     <ul>
@@ -70,7 +81,7 @@
   <div class="notice">
     <strong>현재 실제 실행 구성</strong>
     <p><code>motor_node.py</code> + <code>vision_node.py</code> + <code>color_node.py</code> + <code>test_code_hfsm_modular.py</code> + <code>switch_node.py</code>를 실행합니다. modular Brain의 실제 구현은 <code>hfsm_brain/</code> 폴더에 있습니다.</p>
-    <p>현재 Brain은 스위치가 켜져야 동작하며, 정지 명령은 모터 Hard Stop 서비스 대신 0 속도의 <code>Twist</code>를 반복 발행하는 Soft Stop으로 처리합니다. 초록색이 보이지 않을 때만 벽 회피를 사용하며, 초록색을 인식하면 벽이 없다고 가정합니다.</p>
+    <p>현재 <code>switch_node.py</code>는 테스트용으로 <code>switch_mode=True</code>를 요청하므로 실행하면 Brain이 켜집니다. 물리 스위치 입력은 무시됩니다. 정지 명령은 0 속도의 <code>Twist</code>를 반복 발행하는 Soft Stop이며, 초록색이 보이지 않을 때만 벽 회피를 사용합니다.</p>
   </div>
 
   <h2>파일 사이의 값·신호 흐름</h2>
@@ -80,9 +91,8 @@
       <tr><td><code>vision_node.py</code></td><td>D435i 프레임</td><td>카메라 내부 처리</td><td>초록색·벽을 계산한 뒤 아래 ROS2 토픽을 발행합니다.</td></tr>
       <tr><td><code>vision_node.py</code></td><td><code>/target_found</code> <code>Bool</code><br><code>/target_distance</code> <code>Float32</code><br><code>/target_error</code> <code>Float32</code></td><td><code>hfsm_brain/node.py</code></td><td>초록색 발견 여부, 거리(m), 화면 중심으로부터의 오차를 World Model에 저장합니다.</td></tr>
       <tr><td><code>vision_node.py</code></td><td><code>/wall_distance</code><br><code>/wall_left_distance</code><br><code>/wall_right_distance</code> <code>Float32</code></td><td><code>hfsm_brain/node.py</code></td><td>벽 전체·왼쪽·오른쪽 거리를 저장하고 벽 회피 여부와 방향을 계산합니다.</td></tr>
-      <tr><td><code>vision_node.py</code></td><td><code>/tilt_detected</code> <code>Bool</code><br><code>/tilt_angle_deg</code> <code>Float32</code></td><td><code>hfsm_brain/node.py</code></td><td>D435i IMU의 기준 자세 대비 기울기 여부와 각도를 저장합니다. Raspberry Pi 5에서는 가속도계 스트림이 열리지 않아 현재 테스트 상태입니다.</td></tr>
       <tr><td><code>color_node.py</code></td><td><code>/color_sensor</code> <code>String</code><br><code>{"sensors":{"front_left":"RED", "front_right":"BLACK", "back":"BLUE"}}</code></td><td><code>hfsm_brain/node.py</code></td><td>세 센서 색을 한 묶음으로 받아 <code>sensor1~3</code>을 동시에 갱신하고 색상 패턴표를 계산합니다.</td></tr>
-      <tr><td><code>switch_node.py</code></td><td><code>switch_mode</code> <code>SetBool</code><br><code>data=True/False</code></td><td><code>hfsm_brain/node.py</code></td><td>Brain을 켜거나 끕니다. OFF이면 Soft Stop, ON이면 오프닝 행동을 시작합니다.</td></tr>
+      <tr><td><code>switch_node.py</code></td><td><code>switch_mode</code> <code>SetBool</code><br><code>data=True</code></td><td><code>hfsm_brain/node.py</code></td><td>테스트용으로 Brain을 켭니다. 현재 물리 스위치 상태는 사용하지 않습니다.</td></tr>
       <tr><td><code>hfsm_brain/node.py</code></td><td><code>/cmd_vel</code> <code>Twist</code><br><code>linear.x</code>, <code>angular.z</code></td><td><code>motor_node.py</code></td><td>전진·후진 속도와 회전 속도를 모터 노드에 전달합니다.</td></tr>
       <tr><td><code>motor_node.py</code></td><td>CANopen 목표 속도</td><td>SteadyWin 모터 4개</td><td>좌우 바퀴 그룹에 속도를 나누어 전송합니다.</td></tr>
       <tr><td><code>hfsm_brain/actions/*.py</code></td><td>내부 <code>Motion_Command</code></td><td><code>hfsm_brain/node.py</code></td><td>행동별 이동 명령을 만들고 Brain이 실제 <code>Twist</code>로 발행하게 합니다.</td></tr>
@@ -96,7 +106,7 @@
       <tr><td><code>motor_node.py</code></td><td><code>/cmd_vel</code> <code>Twist</code></td><td>CANopen 속도 명령, 모터 진단, 모터 서비스</td><td class="status active">실행 필요</td></tr>
       <tr><td><code>vision_node.py</code></td><td>D435i 컬러·깊이 프레임</td><td><code>/target_found</code>, <code>/target_distance</code>, <code>/target_error</code>, 벽 거리 3개 토픽</td><td class="status active">현재 사용</td></tr>
       <tr><td><code>color_node.py</code></td><td>TCA9548A 뒤의 I2C 컬러 센서</td><td><code>/color_sensor</code> JSON. CH1=front_right, CH2=back, CH3=front_left</td><td class="status partial">센서별 확인 필요</td></tr>
-      <tr><td><code>switch_node.py</code></td><td>GPIO 17 토글 스위치</td><td><code>switch_mode</code> 서비스 요청</td><td class="status active">실행 필요</td></tr>
+      <tr><td><code>switch_node.py</code></td><td>테스트용 고정 ON 요청</td><td><code>switch_mode=True</code></td><td class="status active">현재 사용</td></tr>
       <tr><td><code>test_code_hfsm_modular.py</code></td><td>별도 ROS 입력 없음</td><td><code>hfsm_brain.node.main()</code>을 호출해 Brain 시작</td><td class="status active">현재 실행 파일</td></tr>
       <tr><td><code>hfsm_brain/node.py</code></td><td>비전 토픽, <code>/color_sensor</code>, <code>switch_mode</code></td><td><code>/cmd_vel</code> <code>Twist</code>, 행동 전환 로그</td><td class="status active">현재 핵심 Brain</td></tr>
       <tr><td><code>hfsm_brain/models.py</code></td><td>다른 모듈의 내부 호출</td><td>색상 enum, 센서 패턴표, World Model, 속도 설정</td><td class="status active">현재 사용</td></tr>
@@ -104,7 +114,7 @@
       <tr><td><code>hfsm_brain/actions/base.py</code></td><td>행동 객체 상태</td><td><code>Action_Step</code> 공통 인터페이스</td><td class="status active">현재 사용</td></tr>
       <tr><td><code>hfsm_brain/actions/navigation.py</code></td><td>World Model</td><td>직진·초록색 추격·45도 회전·벽 90도 회전 명령</td><td class="status active">현재 사용</td></tr>
       <tr><td><code>hfsm_brain/actions/opening.py</code></td><td>World Model, 시간</td><td>시작 왼쪽 45도 회전 후 직진 명령</td><td class="status active">현재 사용</td></tr>
-      <tr><td><code>hfsm_brain/actions/front_sensor.py</code></td><td>센서 패턴, 감지 시각</td><td>양쪽 앞 같은 색이면 후진 후 45도 회전 명령</td><td class="status active">현재 사용</td></tr>
+      <tr><td><code>hfsm_brain/actions/front_sensor.py</code></td><td>센서 패턴, 감지 시각</td><td>양쪽 앞 같은 색이면 양쪽 검정까지 후진 후 나중 감지 방향으로 90도 회전</td><td class="status active">현재 사용</td></tr>
       <tr><td><code>hfsm_brain/actions/back_sensor.py</code></td><td>센서 패턴, 시간</td><td>뒤 센서 부스트, 전체 빨강·파랑 복구 명령</td><td class="status partial">실센서 확인 필요</td></tr>
       <tr><td><code>calibrate_center.py</code></td><td>D435i 프레임, 키보드 입력</td><td><code>center_calibration.json</code> 생성</td><td class="status legacy">일회성 도구</td></tr>
       <tr><td><code>center_calibration.py</code></td><td>보정 JSON, 거리</td><td>보정 중심 좌표 반환</td><td class="status partial">green 계열 보조</td></tr>
@@ -130,10 +140,10 @@
       <tr><td><code>(0,0,0)</code></td><td>앞·뒤 모두 검정</td><td><code>NONE</code></td><td>벽이 가까우면 벽 회피, 아니면 기본 직진</td><td>벽이 가까우면 벽 회피, 아니면 초록색 추격</td></tr>
       <tr><td><code>(1,0,0)</code></td><td>오른쪽 앞만 빨강</td><td><code>FRONT_RIGHT_RED</code></td><td>현재 별도 색 회피 없이 벽 회피 또는 기본 직진</td><td>벽이 없으면 초록색 추격</td></tr>
       <tr><td><code>(0,1,0)</code></td><td>왼쪽 앞만 빨강</td><td><code>FRONT_LEFT_RED</code></td><td>현재 별도 색 회피 없이 벽 회피 또는 기본 직진</td><td>벽이 없으면 초록색 추격</td></tr>
-      <tr><td><code>(1,1,0)</code></td><td>앞 양쪽 빨강</td><td><code>FRONT_BOTH_RED</code></td><td>후진 후 양쪽 검정이 되면 나중 감지 쪽으로 45도 회전</td><td>벽이 있으면 벽 회피가 먼저 실행됨</td></tr>
+      <tr><td><code>(1,1,0)</code></td><td>앞 양쪽 빨강</td><td><code>FRONT_BOTH_RED</code></td><td>후진 후 양쪽 검정이 되면 나중 감지 쪽으로 90도 회전</td><td>초록색이 보이고 400mm 초과여도 같은 회피를 적용; 400mm 이내면 빨강이 사라진 뒤 추격</td></tr>
       <tr><td><code>(2,0,0)</code></td><td>오른쪽 앞만 파랑</td><td><code>FRONT_RIGHT_BLUE</code></td><td>현재 별도 색 회피 없이 벽 회피 또는 기본 직진</td><td>벽이 없으면 초록색 추격</td></tr>
       <tr><td><code>(0,2,0)</code></td><td>왼쪽 앞만 파랑</td><td><code>FRONT_LEFT_BLUE</code></td><td>현재 별도 색 회피 없이 벽 회피 또는 기본 직진</td><td>벽이 없으면 초록색 추격</td></tr>
-      <tr><td><code>(2,2,0)</code></td><td>앞 양쪽 파랑</td><td><code>FRONT_BOTH_BLUE</code></td><td>후진 후 양쪽 검정이 되면 나중 감지 쪽으로 45도 회전</td><td>벽이 있으면 벽 회피가 먼저 실행됨</td></tr>
+      <tr><td><code>(2,2,0)</code></td><td>앞 양쪽 파랑</td><td><code>FRONT_BOTH_BLUE</code></td><td>초록색이 없으면 후진 후 양쪽 검정이 되면 나중 감지 쪽으로 90도 회전</td><td>초록색이 보이면 기존 거리별 파랑 행동을 적용</td></tr>
       <tr><td><code>(0,0,1)</code></td><td>뒤만 빨강</td><td><code>BACK_RED</code></td><td>패턴이 사라질 때까지 최대 속도 직진</td><td>벽이 있으면 벽 회피가 먼저 실행됨</td></tr>
       <tr><td><code>(0,0,2)</code></td><td>뒤만 파랑</td><td><code>BACK_BLUE</code></td><td>패턴이 사라질 때까지 최대 속도 직진</td><td>벽이 있으면 벽 회피가 먼저 실행됨</td></tr>
       <tr><td><code>(1,1,1)</code></td><td>전체 빨강</td><td><code>ALL_RED</code></td><td>5초 동안 최대 속도 전진, 이후 앞 양쪽 빨강이 될 때까지 후진, 그 뒤 Soft Stop</td><td>벽이 감지되면 벽 회피가 먼저 시작됨</td></tr>

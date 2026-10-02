@@ -18,7 +18,7 @@ class Green_Close_Front_Phase(Enum):
 
 
 class Green_Close_Front_Color_Action(Action):
-    """Reverse until the front color clears, then hold while green remains close."""
+    """Reverse until the front color clears, then return to green following."""
 
     name = "GREEN_CLOSE_FRONT_COLOR"
     interruptible_by_green = False
@@ -56,20 +56,14 @@ class Green_Close_Front_Color_Action(Action):
                 )
             )
 
-        if 0.0 < world.target_distance <= 0.40:
-            # 색을 벗어난 뒤에도 목표가 40 cm 이내면 돌진 대신 정지 유지한다.
-            return Action_Step(
-                Motion_Command(0.0, 0.0, False, f"GREEN_CLOSE_{self.color.name}_HOLD")
-            )
-
-        # 목표가 멀어지면 이 전용 안전 행동을 끝내고 일반 판단으로 돌린다.
+        # 앞 색이 사라지면 거리와 관계없이 전용 행동을 끝내고 일반 초록 추격으로 돌아간다.
         return Action_Step(
             Motion_Command(label=f"GREEN_CLOSE_{self.color.name}_RELEASE"),
             finished=True,
         )
 
 class Green_Close_Front_Red_Action(Action):
-    """Reverse until front red clears, then hold while green remains close."""
+    """Reverse until front red clears, then return to green following."""
 
     name = "GREEN_CLOSE_FRONT_RED"
     interruptible_by_green = False
@@ -87,12 +81,12 @@ class Green_Close_Front_Red_Action(Action):
                 finished=True,
             )
 
-        # 앞 센서에 빨강·파랑 무엇이든 남으면 두 센서가 검정이 될 때까지 계속 후진한다.
-        front_color_present = (
-            world.sensor1 != Sensor_Color.BLACK
-            or world.sensor2 != Sensor_Color.BLACK
+        # 앞 센서에 빨강이 하나라도 남아 있으면 빨강이 모두 사라질 때까지 후진한다.
+        front_red_present = (
+            world.sensor1 == Sensor_Color.RED
+            or world.sensor2 == Sensor_Color.RED
         )
-        if front_color_present:
+        if front_red_present:
             return Action_Step(
                 Motion_Command(
                     self.config.reverse_speed,
@@ -100,11 +94,6 @@ class Green_Close_Front_Red_Action(Action):
                     False,
                     "GREEN_CLOSE_FRONT_RED_BACK_UNTIL_CLEAR",
                 )
-            )
-
-        if 0.0 < world.target_distance <= 0.40:
-            return Action_Step(
-                Motion_Command(0.0, 0.0, False, "GREEN_CLOSE_FRONT_RED_HOLD")
             )
 
         return Action_Step(

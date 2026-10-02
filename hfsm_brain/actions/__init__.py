@@ -20,7 +20,6 @@ from .navigation import (
 )
 
 from .opening import Opening_Action
-from .tilt import Tilt_Turn_Action
 
 from .back_sensor import (
     All_Blue_Recovery_Action,
@@ -42,7 +41,6 @@ __all__ = [
     "Green_Follow_Action",
     "Green_Sensor_Follow_Action",
     "Opening_Action",
-    "Tilt_Turn_Action",
     "Back_Single_Boost_Action",
     "Wall_Avoid_Action",
 ]
