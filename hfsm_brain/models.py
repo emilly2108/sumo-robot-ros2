@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 
@@ -84,29 +83,33 @@ class World_Model:
 @dataclass(frozen=True)
 class Brain_Config:
     # 평상시 순항, 목표 추격, 근거리 전투, 최대, 후진 선속도다.
-    base_speed: float = 0.6
-    chase_speed: float = 0.7
-    battle_speed: float = 0.8
-    max_speed: float = 1.0
-    reverse_speed: float = -0.6
+    base_speed: float = 0.3
+    chase_speed: float = 0.3
+    battle_speed: float = 0.3
+    max_speed: float = 0.3
+    reverse_speed: float = -0.3
 
-    # 허용할 최대 각속도와 고정 회전 행동 속도다.
-    max_angular_speed: float = 2.0
-    turn_speed: float = 0.8
+    # 45도·90도 회전 테스트 코드의 각속도 설정(rad/s)이다.
+    max_angular_speed: float = 10.0
+    turn_speed: float = 10.0
     kp: float = 1.8
     deadzone: float = 0.03
 
     # 목표가 가깝다고 보는 거리와 벽 회피를 시작할 거리다.
     opponent_close_distance: float = 0.50
-    wall_close_distance: float = 0.20
+    wall_close_distance: float = 0.30
     no_wall_distance: float = 9.9
 
-    # HFSM 제어 루프를 0.05초로 실행해 /cmd_vel을 초당 20회 발행한다.
+    # 회전 테스트 코드의 20Hz 발행 주기에 맞춰 제어 루프를 실행한다.
     control_period: float = 0.05
     # 기준 거리 10cm
     short_distance: float = 0.10
-    turn_45_duration: float = (math.pi / 4.0) / 0.8
-    turn_90_duration: float = (math.pi / 2.0) / 0.8
+    # 45도 테스트 파일의 실제 계산(90도 인자, 10rad/s)에서 나온 0.4초를 사용한다.
+    turn_45_duration: float = 0.4 * (90.0 / 90.0) * (5.0 / 10.0)
+    # 90도 테스트 기준: 90도·5rad/s에서 1.4초를 기준으로 10rad/s에 환산한다.
+    turn_90_duration: float = 0.6 * (90.0 / 90.0) * (5.0 / 10.0)
+    # 45도·90도 회전 명령을 내리기 전에 속도 0을 유지할 시간이다.
+    pre_turn_stop_duration: float = 1.0
     # 후진 할지 말지 결정하는 5초
     all_color_push_duration: float = 5.0
     # 실제 벽 토픽을 이 시간 이상 받지 못하면 벽 정보를 오래된 것으로 본다.

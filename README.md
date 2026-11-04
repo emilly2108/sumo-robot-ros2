@@ -10,22 +10,26 @@ Intel RealSense D435i 비전 노드, TCS34725 컬러 센서 노드, CANopen 모�
 vision_node.py  -> /target_error, /target_distance, /target_found
                 -> /wall_distance, /wall_left_distance, /wall_right_distance
 color_node.py   -> /color_sensor
-switch_node.py  -> switch_mode 서비스 요청
+switch_node.py  -> GPIO 23/27 상태로 switch_mode 서비스 요청
 hfsm_brain      -> /cmd_vel
-motor_node.py   -> CANopen 모터 4개
+motor_node.py + canopen_drive.py -> CANopen 모터 4개
 ```
 
 `vision_node.py`는 현재 D435i 컬러·깊이 스트림만 사용하며 IMU 토픽은 발행하지 않습니다.
-`switch_node.py`는 테스트용으로 GPIO 스위치 입력과 관계없이 `switch_mode=True`를 요청합니다.
-실행하면 Brain이 곧바로 동작하므로 바퀴를 띄우고 시험하세요.
+`switch_node.py`는 GPIO27의 FIGHT와 GPIO23의 READY 입력을 읽어 Brain 모드를
+전환합니다. `main_switch_supervisor.py`는 별도 systemd 서비스가 설치된 환경에서
+메인 스위치로 서비스를 시작하거나 중지하는 보조 프로그램입니다.
 
 HFSM brain이 켜진 뒤에는
-벽 회피를 먼저 판단하고, 벽이 없으면 초록색 추격, 컬러 센서 패턴 행동, 기본 주행
-순서로 판단합니다. 실제 동작 우선순위와 센서 조합은 아래 표로 정리했습니다.
+초록색이 보이면 초록색 거리와 색상 센서의 전용 행동을 먼저 고릅니다. 초록색이
+없으면 실행 가능한 색상 행동, 벽 회피, 기본 주행 순으로 판단합니다. 벽 회전
+중의 거리값은 재회피 판단에 사용하지 않고, 회전 후 새 좌우 측정값 3쌍이
+들어온 뒤 다시 벽 회피 여부를 판단합니다.
 
-현재 기본 발행 주기는 Brain `/cmd_vel` 20Hz, 비전 처리·발행 10Hz, 컬러 센서 10Hz,
-모터 CAN 전송 20Hz입니다. 모터가 `command-ready`가 아니면 주기를 낮춰도 명령은
-거부되므로, 그 경우에는 모터 노드의 CANopen 상태와 fault를 별도로 확인해야 합니다.
+현재 설정상 Brain 제어 주기와 모터 CAN 전송 주기는 각각 20Hz, 비전 처리
+타이머는 30Hz, 컬러 센서 타이머는 20Hz입니다. 실제 발행률은 하드웨어 상태에
+따라 달라질 수 있습니다. 모터가 준비되지 않았거나 CAN fault가 나면 명령은
+거부되므로 모터의 상태와 물리적 비상 정지 수단을 별도로 확인해야 합니다.
 
 ## 센서 위치와 값
 
@@ -55,7 +59,7 @@ HFSM brain이 켜진 뒤에는
 
 | 센서 조합 | 색깔 상태 | 초록색 없음·벽 없음 | 초록색 인식 | 동작 |
 |---|---|---|---|---|
-| `0, 0, 0` | 앞·뒤 모두 검정 | 기본 속도로 직진 | 초록색 추격 | `Cruise_Action` |
+| `0, 0, 0` | 앞·뒤 모두 검정 | 기본 속도로 직진 | 1.5m 이상이면 45도 회전·짧은 직진 후 추격, 그보다 가까우면 바로 추격 | `Cruise_Action` / `Far_Green_Turn_Action` |
 | `1, 0, 0` | 앞 오른쪽 빨강만 | 원래 경로로 계속 주행 | 초록색 추격 | 한쪽만 감지했으므로 회피하지 않음 |
 | `0, 1, 0` | 앞 왼쪽 빨강만 | 원래 경로로 계속 주행 | 초록색 추격 | 한쪽만 감지했으므로 회피하지 않음 |
 | `2, 0, 0` | 앞 오른쪽 파랑만 | 원래 경로로 계속 주행 | 초록색 추격 | 한쪽만 감지했으므로 회피하지 않음 |
@@ -64,26 +68,26 @@ HFSM brain이 켜진 뒤에는
 | `2, 2, 0` | 앞 양쪽 파랑 | 양쪽 앞이 검정이 될 때까지 후진 후 나중 감지 방향으로 90도 회전 | 기존 초록색 거리별 파랑 행동 | `Front_Color_Avoid_Action` |
 | `0, 0, 1` | 뒤쪽 빨강만 | 최대 또는 추격 보조 속도 | 초록색 추격 | `Back_Single_Boost_Action` |
 | `0, 0, 2` | 뒤쪽 파랑만 | 최대 또는 추격 보조 속도 | 초록색 추격 | `Back_Single_Boost_Action` |
-| `1, 1, 1` | 모든 센서 빨강 | 빨강 복구 행동 | 초록색 추격으로 전환 | `All_Red_Recovery_Action` (미검증) |
-| `2, 2, 2` | 모든 센서 파랑 | 최대 속도 유지 후 5초 이상이면 후진 | 초록색 추격으로 전환 | `All_Blue_Recovery_Action` (미검증) |
+| `1, 1, 1` | 모든 센서 빨강 | 앞 양쪽 검정까지 후진 후 90도 회전 | 최대 속도 직진 5초 후 000까지 후진 | `Front_Color_Avoid_Action` / `All_Red_Recovery_Action` |
+| `2, 2, 2` | 모든 센서 파랑 | 앞 양쪽 검정까지 후진 후 90도 회전 | 50mm 이하면 최대 속도, 그 외에는 추격 | `Front_Color_Avoid_Action` / `Green_Sensor_Follow_Action` |
 
 ## 초록색이 보일 때 색상 센서 행동표
 
 초록색이 보이면 아래 표를 사용합니다. 거리는 `vision_node.py`가 보내는 미터 단위이며,
 `0.05m=50mm`입니다. 표에 없는 혼합 색상은 초록색 추격을 기본값으로 사용합니다.
-벽이 가까우면 아래 표보다 `Wall_Avoid_Action`이 먼저 실행됩니다.
+초록색이 보일 때는 일반 벽 회피보다 아래의 초록색·색상 행동을 우선합니다.
 
-| 센서 조합 `(sensor1, sensor2, sensor3)` | `거리 <= 50mm` | `50mm < 거리 < 1.2m` | `거리 >= 1.2m` | 선택 행동 |
+| 센서 조합 `(sensor1, sensor2, sensor3)` | `거리 <= 50mm` | `50mm < 거리 < 1.5m` | `거리 >= 1.5m` | 선택 행동 |
 |---|---|---|---|---|
-| `0, 0, 0` | 기존 초록색 추격 | 기존 초록색 추격 | 기존 초록색 추격 | `Green_Follow_Action` |
+| `0, 0, 0` | 기존 초록색 추격 | 기존 초록색 추격 | 왼쪽 45도 회전·짧은 직진 후 추격 | `Green_Follow_Action` / `Far_Green_Turn_Action` |
 | `1, 0, 0` 또는 `0, 1, 0` | 원래 경로로 초록색 추격 | 원래 경로로 초록색 추격 | 45도 회전 후 초록색 추격 | `Far_Green_Turn_Action` 또는 `Green_Follow_Action` |
 | `2, 0, 0` 또는 `0, 2, 0` | 원래 경로로 초록색 추격 | 원래 경로로 초록색 추격 | 원래 경로로 초록색 추격 | `Green_Follow_Action` |
-| `1, 1, 0` | 앞 빨강이 사라질 때까지 후진 후 초록색 추격 | 거리 400mm 초과면 양쪽 앞이 검정이 될 때까지 후진 후 나중 감지 방향으로 90도 회전 | 양쪽 앞이 검정이 될 때까지 후진 후 나중 감지 방향으로 90도 회전 | `Green_Close_Front_Red_Action` 또는 `Front_Color_Avoid_Action` |
-| `2, 2, 0` | 앞 양쪽이 검정이 될 때까지 후진 후 초록색 중심 추격 | 기존처럼 후진 후 나중 감지 방향으로 45도 회전 | 기존 회피 행동 | `Green_Close_Front_Color_Action` 또는 `Front_Color_Avoid_Action` |
-| `0, 0, 1` | 최대 속도로 초록색 추격 | 초록색 추격 | 초록색 추격 | `Green_Sensor_Follow_Action` |
-| `0, 0, 2` | 앞 양쪽이 모두 색이면 검정이 될 때까지 후진, 아니면 최대 속도 추격 | 초록색 추격 | 초록색 추격 | `Green_Close_Back_Blue_Action` 또는 `Green_Sensor_Follow_Action` |
-| `1, 1, 1` | 전체 빨강 상태가 풀릴 때까지 후진 | 초록색 추격 | 초록색 추격 | `Green_Close_All_Red_Action` 또는 `Green_Follow_Action` |
-| `2, 2, 2` | 최대 속도로 초록색 추격 | 초록색 추격 | 초록색 추격 | `Green_Sensor_Follow_Action` |
+| `1, 1, 0` | 앞 빨강이 사라질 때까지 후진 후 추격 | 400mm 이하면 같은 후진, 초과면 앞 양쪽 검정까지 후진 후 90도 회전 | 앞 양쪽 검정까지 후진 후 90도 회전 | `Green_Close_Front_Red_Action` 또는 `Front_Color_Avoid_Action` |
+| `2, 2, 0` | 앞 파랑이 사라질 때까지 후진 후 추격 | 400mm 이하면 같은 후진, 초과면 앞 양쪽 검정까지 후진 후 45도 회전 | 왼쪽 45도 회전·짧은 직진 후 추격 | `Green_Close_Front_Color_Action` / `Front_Color_Avoid_Action` / `Far_Green_Turn_Action` |
+| `0, 0, 1` | 최대 속도로 초록색 추격 | 최대 속도로 초록색 추격 | 최대 속도로 초록색 추격 | `Green_Follow_Action` |
+| `0, 0, 2` | 최대 속도로 초록색 추격 | 최대 속도로 초록색 추격 | 최대 속도로 초록색 추격 | `Green_Follow_Action` |
+| `1, 1, 1` | 최대 속도 직진 5초 후 000까지 후진 | 최대 속도 직진 5초 후 000까지 후진 | 최대 속도 직진 5초 후 000까지 후진 | `All_Red_Recovery_Action` |
+| `2, 2, 2` | 최대 속도로 초록색 추격 | 일반 초록색 추격 | 일반 초록색 추격 | `Green_Sensor_Follow_Action` |
 
 앞 센서 한쪽만 빨강 또는 파랑인 경우에는 색상 회피를 시작하지 않고 초록색 중심을
 따라갑니다. 뒤 파랑 상태에서 앞 양쪽에 색이 동시에 나타나면 정확한 패턴표에 없는
@@ -91,8 +95,7 @@ HFSM brain이 켜진 뒤에는
 초록색 추격 명령은 비전 노드가 계산한 중심 오차를 사용하므로 캘리브레이션된 중심 기준은
 기존과 같습니다.
 
-벽이 가까우면 위 표보다 `Wall_Avoid_Action`이 먼저 실행됩니다. 표에 없는 서로 다른
-색의 혼합 조합은 현재 전용 색상 행동이 등록되어 있지 않습니다.
+표에 없는 서로 다른 색의 혼합 조합은 현재 전용 색상 행동이 등록되어 있지 않습니다.
 
 검증 상태: `(1, 1, 1)`과 `(2, 2, 2)`를 제외한 색상 센서 조합은 확인되었습니다.
 두 전체 센서 복구 행동은 현재 확인 환경이 준비되지 않아 아직 실환경에서 검증하지
@@ -105,8 +108,11 @@ HFSM brain이 켜진 뒤에는
 - `hfsm_brain/actions/`: 오프닝, 초록색 추격·센서 분기, 벽 회피, 센서 행동
 - `vision_node.py`: D435i 초록색 목표와 벽 거리 인식
 - `color_node.py`: TCS34725 컬러 센서 입력 및 색상 분류
-- `motor_node.py`: `/cmd_vel`을 CANopen 모터 명령으로 변환
+- `motor_node.py`, `canopen_drive.py`: `/cmd_vel`을 네 축 CANopen 명령으로 변환·검증
 - `switch_node.py`: GPIO 물리 스위치와 `switch_mode` 서비스 연결
+- `main_switch_supervisor.py`: 별도 systemd 서비스용 메인 스위치 감시 프로그램
+- `turn_45.py`, `turn_90.py`: 독립 회전 시험 도구
+- `tests/test_hfsm_priority.py`: ROS 장치 없이 HFSM 우선순위를 검사하는 테스트
 - `PROJECT_STATUS.html`: 파일별 역할, 토픽 흐름, 색상 패턴별 동작 정리
 
 ## 준비 환경
@@ -128,14 +134,19 @@ HFSM brain이 켜진 뒤에는
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd ~/ros2_ws/src/sumo_robot/sumo_robot
+cd ~/ros2_ws/src/sumo_robot
 
-python3 vision_node.py
-python3 color_node.py
-python3 motor_node.py
-python3 -m hfsm_brain.node
-python3 switch_node.py
+python3 -m sumo_robot.vision_node
+python3 -m sumo_robot.color_node
+python3 -m sumo_robot.motor_node
+python3 -c 'from sumo_robot.hfsm_brain.node import main; main()'
+python3 -m sumo_robot.switch_node
 ```
+
+상대 import를 쓰는 `vision_node.py`와 `motor_node.py`는 패키지의 상위 폴더에서
+모듈 방식으로 실행해야 합니다. 각 명령은 별도 터미널에서 실행합니다.
+`main_switch_supervisor.py`를 쓰려면 이 저장소에 포함되지 않은 systemd 서비스
+설정과 메인 스위치 GPIO 환경변수를 별도로 준비해야 합니다.
 
 실행 전 카메라, I2C 컬러 센서, CAN 인터페이스를 연결하고 모터를 들어 올린
 상태에서 토픽을 확인하는 것을 권장합니다.
@@ -162,7 +173,10 @@ ros2 topic echo /cmd_vel
 - 속도와 거리 기준은 대회장과 하드웨어에 맞춰 별도 검증해야 합니다.
 
 
-## 현재 구현 상황
+## 이전 테스트 메모
+
+아래 표와 문제 목록은 과거 테스트 당시 작성한 기록입니다. 현재 실행 동작은 위의
+행동표와 이번에 동기화한 `hfsm_brain/` 코드를 기준으로 확인하세요.
 
 - 초록색이 안보일 때
 
@@ -197,7 +211,7 @@ ros2 topic echo /cmd_vel
 | `1, 1, 1` | 모든 센서 빨강 | 빨강 복구 행동 | 초록색 추격으로 전환 | `All_Red_Recovery_Action` (미검증 - 코드는 구현되었으나 실험 불가) |
 | `2, 2, 2` | 모든 센서 파랑 | 최대 속도 유지 후 5초 이상이면 후진 | 초록색 추격으로 전환 | `All_Blue_Recovery_Action` (미검증 - 코드는 구현되었으나 실험 불가) |
 
-현재 발생한 문제
+당시 보고된 문제
 
 - 버퍼링 걸려서 로봇이 바로바로 행동을 못함 <= 토픽쏘는 속도를 낮춰 버퍼링을 줄임 ( 해결 8.29)
 - 앞 양쪽 같은 색 감지 후 후진·나중 감지 방향 90도 회전 동작은 코드에 반영했으며, 로봇 실환경에서 확인이 필요함

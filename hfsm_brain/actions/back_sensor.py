@@ -41,6 +41,8 @@ class All_Red_Recovery_Action(Action):
         self.started_at = now
 
     def step(self, now: float, world: World_Model) -> Action_Step:
+        if not world.target_found:
+            return Action_Step(Motion_Command(label="ALL_RED_GREEN_LOST"), True)
         if self.phase == All_Red_Phase.PUSH:
             if world.sensor_event != Sensor_Event.ALL_RED:
                 # 더 이상 111이 아니면 최대 속도 밀기를 취소하고 행동을 종료한다.

@@ -159,3 +159,4 @@ class Green_Close_Back_Blue_Action(Action):
 
         # 남은 경우에는 센서 전용 초록 추격 명령을 계산해 반환한다.
         return Action_Step(green_sensor_follow_command(world, self.config))
+

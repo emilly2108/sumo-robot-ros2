@@ -1,4 +1,5 @@
 import json
+import math
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -8,7 +9,6 @@ from std_srvs.srv import SetBool
 
 from .actions import (
     Action,
-    All_Blue_Recovery_Action,
     All_Red_Recovery_Action,
     Cruise_Action,
     Far_Green_Turn_Action,
@@ -32,11 +32,17 @@ from .models import (
     World_Model,
 )
 
-class Hfsm_Brain_Node(Node):
+class HFSMBrainNode(Node):
     def __init__(self):
-        super().__init__("brain_hfsm_node")
+        super().__init__("hfsm_brain_node")
         self.config = Brain_Config()
         self.world = World_Model()
+        # 벽을 벗어났다고 확인할 때까지 첫 회피 방향을 기억한다.
+        self.wall_turn_direction = None
+        self.wall_clear_started_at = None
+        self.wall_clear_samples = 0
+        self.pending_wall_distances = {}
+        self.wall_recheck_pairs_remaining = 0
         self.back_sensor_candidate = Sensor_Color.BLACK
         self.back_sensor_candidate_frames = 0
         self.back_sensor_stable_frames = 3
@@ -84,16 +90,93 @@ class Hfsm_Brain_Node(Node):
         self.world.target_missing_frames += 1
 
     def wall_distance_callback(self, msg: Float32) -> None:
+        if isinstance(self.active_action, Wall_Avoid_Action):
+            return
         self.world.wall_distance = float(msg.data)
-        self.world.wall_last_received_at = now_seconds(self)
 
     def wall_left_callback(self, msg: Float32) -> None:
-        self.world.wall_left_distance = float(msg.data)
-        self.world.wall_last_received_at = now_seconds(self)
+        self.receive_wall_side("left", float(msg.data))
 
     def wall_right_callback(self, msg: Float32) -> None:
-        self.world.wall_right_distance = float(msg.data)
-        self.world.wall_last_received_at = now_seconds(self)
+        self.receive_wall_side("right", float(msg.data))
+
+    def receive_wall_side(self, side: str, distance: float) -> None:
+        if isinstance(self.active_action, Wall_Avoid_Action):
+            self.pending_wall_distances.clear()
+            return
+        now = now_seconds(self)
+        if not math.isfinite(distance) or distance <= 0.0:
+            self.pending_wall_distances.clear()
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            return
+
+        if any(
+            now - received_at > self.config.wall_timeout
+            for _, received_at in self.pending_wall_distances.values()
+        ):
+            self.pending_wall_distances.clear()
+        self.pending_wall_distances[side] = (distance, now)
+        if len(self.pending_wall_distances) < 2:
+            return
+
+        # 좌우 모두 새 값이 들어온 뒤 한 번에 반영한다. 기존 Float32 토픽에는
+        # 프레임 번호가 없으므로 정확히 같은 촬영 프레임임을 보장하지는 않는다.
+        left, left_at = self.pending_wall_distances["left"]
+        right, right_at = self.pending_wall_distances["right"]
+        self.pending_wall_distances.clear()
+        if now - self.world.wall_last_received_at > self.config.wall_timeout:
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+        self.world.wall_left_distance = left
+        self.world.wall_right_distance = right
+        # 한쪽만 계속 수신돼도 반대쪽의 오래된 값이 살아남지 않도록 한다.
+        self.world.wall_last_received_at = min(left_at, right_at)
+        if self.wall_recheck_pairs_remaining:
+            self.wall_recheck_pairs_remaining -= 1
+
+        # 회전 도중 잠깐 벽이 안 보이는 것으로 방향 기억을 풀지 않는다.
+        if (
+            self.wall_turn_direction is None
+            or isinstance(self.active_action, Wall_Avoid_Action)
+            or wall_avoid_direction(self.world, self.config) is not None
+        ):
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            return
+
+        if self.wall_clear_started_at is None:
+            self.wall_clear_started_at = now
+        self.wall_clear_samples += 1
+        # 제어 루프 횟수가 아니라 새 좌우 측정값으로 해제를 확인한다.
+        if self.wall_clear_samples >= 5 and now - self.wall_clear_started_at >= 0.5:
+            self.wall_turn_direction = None
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            self.get_logger().info("WALL_DIRECTION_RELEASED: clear wall readings confirmed")
+
+    def get_wall_turn_direction(self):
+        if self.wall_recheck_pairs_remaining:
+            return None
+        direction = wall_avoid_direction(self.world, self.config)
+        if direction is None:
+            return None
+        if self.wall_turn_direction is None:
+            # 이미 회전 중이라면 그 행동이 선택한 방향을 이어 간다.
+            self.wall_turn_direction = (
+                self.active_action.direction
+                if isinstance(self.active_action, Wall_Avoid_Action)
+                else direction
+            )
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            side = "LEFT" if self.wall_turn_direction > 0.0 else "RIGHT"
+            self.get_logger().info(
+                f"WALL_DIRECTION_LOCKED={side} "
+                f"L={self.world.wall_left_distance:.2f}m "
+                f"R={self.world.wall_right_distance:.2f}m"
+            )
+        return self.wall_turn_direction
 
     def switch_mode_callback(self, request: SetBool.Request, response: SetBool.Response):
         enabled = bool(request.data)
@@ -108,6 +191,11 @@ class Hfsm_Brain_Node(Node):
         if enabled:
             self.opening_done = False
             self.far_green_turn_done = False
+            self.wall_turn_direction = None
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            self.pending_wall_distances.clear()
+            self.wall_recheck_pairs_remaining = 0
             self.active_action.exit(cancelled=True)
             self.active_action = Opening_Action(self.config)
             self.active_action.enter(now_seconds(self), self.world)
@@ -270,6 +358,9 @@ class Hfsm_Brain_Node(Node):
             self.world.wall_distance = self.config.no_wall_distance
             self.world.wall_left_distance = self.config.no_wall_distance
             self.world.wall_right_distance = self.config.no_wall_distance
+            # 수신 중단은 '벽 없음' 확인이 아니다. 기억한 회피 방향은 유지한다.
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
 
     def transition_to(self, next_action: Action, now: float, cancelled: bool = False) -> None:
         if self.active_action.key() == next_action.key():
@@ -288,28 +379,22 @@ class Hfsm_Brain_Node(Node):
         if self.world.target_found:
             return self.choose_green_action()
 
-        # 초록색을 잃은 경우에만 벽을 확인한다. 벽이 보이면 한 번의
-        # Wall_Avoid_Action이 정확히 90도 회전을 끝낸 뒤 다음 판단으로 돌아온다.
-        direction = wall_avoid_direction(self.world, self.config)
-        if direction is not None:
-            return Wall_Avoid_Action(self.config, direction)
-
+        # 초록색이 없으면 실행 가능한 색깔 행동을 일반 벽 회피보다 먼저 고른다.
         event = self.world.sensor_event
-        if event == Sensor_Event.FRONT_BOTH_RED:
+        if event in (Sensor_Event.FRONT_BOTH_RED, Sensor_Event.ALL_RED):
             return Front_Color_Avoid_Action(
                 self.config, Sensor_Color.RED, None, turn_degrees=90
             )
-        if event == Sensor_Event.FRONT_BOTH_BLUE:
+        if event in (Sensor_Event.FRONT_BOTH_BLUE, Sensor_Event.ALL_BLUE):
             return Front_Color_Avoid_Action(
                 self.config, Sensor_Color.BLUE, None, turn_degrees=90
             )
         if event in (Sensor_Event.BACK_RED, Sensor_Event.BACK_BLUE):
             return Back_Single_Boost_Action(self.config, event)
-        if event == Sensor_Event.ALL_RED:
-            return All_Red_Recovery_Action(self.config)
-        if event == Sensor_Event.ALL_BLUE:
-            return All_Blue_Recovery_Action(self.config)
 
+        direction = self.get_wall_turn_direction()
+        if direction is not None:
+            return Wall_Avoid_Action(self.config, direction)
         return Cruise_Action(self.config)
 
     def choose_green_action(self) -> Action:
@@ -319,8 +404,8 @@ class Hfsm_Brain_Node(Node):
         distance = self.world.target_distance
         # 5 cm 이내는 초근접 전용 안전 규칙을 적용할 거리다.
         green_close = 0.0 < distance <= 0.05
-        # 1.2 m 이상은 먼 목표를 향한 한 번의 접근 회전을 적용할 거리다.
-        green_far = distance >= 1.2
+        # 1.5 m 이상은 먼 목표를 향한 한 번의 접근 회전을 적용할 거리다.
+        green_far = distance >= 1.5
         front_right_colored = self.world.sensor1 != Sensor_Color.BLACK
         front_left_colored = self.world.sensor2 != Sensor_Color.BLACK
         # 앞 양쪽 색 유무는 초근접 뒤 파랑 예외를 판정하는 데 쓴다.
@@ -347,8 +432,7 @@ class Hfsm_Brain_Node(Node):
         if event == Sensor_Event.ALL_BLUE:
             return Green_Sensor_Follow_Action(self.config)
 
-        # All-red uses the same five-second push and 000 recovery sequence
-        # whether or not a green target is currently visible.
+        # 초록색이 보이는 동안에만 전체 빨강의 5초 밀기 행동을 선택한다.
         if event == Sensor_Event.ALL_RED:
             return All_Red_Recovery_Action(self.config)
 
@@ -388,7 +472,7 @@ class Hfsm_Brain_Node(Node):
                 None,
                 interruptible_by_green=False,
             )
-        # 앞 한쪽 빨강만 보이면 1.2m 이상에서만 기존 45도 회전을 사용한다.
+        # 앞 한쪽 빨강만 보이면 1.5m 이상에서만 기존 45도 회전을 사용한다.
         if event in (Sensor_Event.FRONT_RIGHT_RED, Sensor_Event.FRONT_LEFT_RED):
             if green_far and not self.far_green_turn_done:
                 return Far_Green_Turn_Action(self.config)
@@ -470,10 +554,33 @@ class Hfsm_Brain_Node(Node):
             )
             return
 
-        # 초록색이 보이는 동안에는 벽 거리를 없는 것으로 취급한다.
+        color_events = (
+            Sensor_Event.FRONT_BOTH_RED,
+            Sensor_Event.ALL_RED,
+            Sensor_Event.FRONT_BOTH_BLUE,
+            Sensor_Event.ALL_BLUE,
+            Sensor_Event.BACK_RED,
+            Sensor_Event.BACK_BLUE,
+        )
+        color_detected = self.world.sensor_event in color_events
+        # 앞 센서는 검정으로 돌아온 뒤에도 정지와 회전을 완료해야 한다.
+        color_action_active = isinstance(self.active_action, Front_Color_Avoid_Action) or (
+            isinstance(self.active_action, Back_Single_Boost_Action)
+            and self.world.sensor_event == self.active_action.expected_event
+        )
+
+        # 벽 회피 중 색깔이 확인되면 벽 행동을 취소하고 색깔 행동으로 바꾼다.
+        if (
+            not self.world.target_found
+            and color_detected
+            and isinstance(self.active_action, Wall_Avoid_Action)
+        ):
+            self.transition_to(self.choose_action(), now, cancelled=True)
+
+        # 초록색이 보이거나 색깔 행동이 진행 중이면 일반 벽 회피는 개입하지 않는다.
         wall_direction = None
-        if not self.world.target_found:
-            wall_direction = wall_avoid_direction(self.world, self.config)
+        if not self.world.target_found and not (color_detected or color_action_active):
+            wall_direction = self.get_wall_turn_direction()
         if (
             wall_direction is not None
             and not isinstance(self.active_action, Wall_Avoid_Action)
@@ -549,6 +656,14 @@ class Hfsm_Brain_Node(Node):
                 self.far_green_turn_done = True
 
             # 현재 행동이 정상적으로 완료됐으므로 cancelled=False로 종료 처리한다.
+            if isinstance(self.active_action, Wall_Avoid_Action):
+                # 회전 전과 회전 중에 측정한 벽은 다음 회피 판단에 사용하지 않는다.
+                self.pending_wall_distances.clear()
+                self.world.wall_distance = self.config.no_wall_distance
+                self.world.wall_left_distance = self.config.no_wall_distance
+                self.world.wall_right_distance = self.config.no_wall_distance
+                self.world.wall_last_received_at = 0.0
+                self.wall_recheck_pairs_remaining = 3
             self.active_action.exit(cancelled=False)
             self.active_action = self.choose_action()
             self.active_action.enter(now, self.world)
@@ -558,7 +673,7 @@ class Hfsm_Brain_Node(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = Hfsm_Brain_Node()
+    node = HFSMBrainNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

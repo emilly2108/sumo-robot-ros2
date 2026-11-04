@@ -4,6 +4,7 @@ import json
 import board
 import busio
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -47,6 +48,7 @@ class TCS3472ColorNode(Node):
         self.blue_r_max = 0.20
 
         self.publisher = self.create_publisher(String, "/color_sensor", 10)
+        self.last_logged_colors = None
 
         self.i2c = busio.I2C(board.SCL, board.SDA)
         self.tca = adafruit_tca9548a.TCA9548A(self.i2c)
@@ -126,21 +128,42 @@ class TCS3472ColorNode(Node):
         msg = String()
         msg.data = json.dumps({"sensors": sensor_colors})
         self.publisher.publish(msg)
-        self.get_logger().info(f"sensors: {sensor_colors}")
+        if sensor_colors != self.last_logged_colors:
+            self.get_logger().info(f"sensors: {sensor_colors}")
+            self.last_logged_colors = dict(sensor_colors)
+
+    def destroy_node(self):
+        # 센서 읽기 주기를 먼저 멈추고 I2C 장치를 해제한 뒤 ROS 자원을 정리한다.
+        if hasattr(self, "timer"):
+            self.timer.cancel()
+        if hasattr(self, "i2c"):
+            try:
+                self.i2c.deinit()
+            except Exception:
+                # 종료 중의 하드웨어 해제 실패가 ROS 종료를 막아서는 안 된다.
+                pass
+        return super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = TCS3472ColorNode()
+    node = None
 
     try:
+        node = TCS3472ColorNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Color sensor node stopped by user")
+        if node is not None and rclpy.ok():
+            node.get_logger().info("Color sensor node stopped by user")
+    except ExternalShutdownException:
+        # launch가 전체 ROS context를 먼저 종료한 정상 종료 경로다.
+        pass
 
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

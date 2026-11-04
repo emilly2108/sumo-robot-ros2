@@ -1,4 +1,4 @@
-from ..models import Action_Step, World_Model
+from ..models import Action_Step, Motion_Command, World_Model
 
 class Action:
     # 각 하위 행동이 로그에 제공할 기본 이름이다.
@@ -18,6 +18,16 @@ class Action:
 
     def can_interrupt_for_green(self) -> bool:
         return self.interruptible_by_green
+
+    def reset_pre_turn_stop(self) -> None:
+        self.pre_turn_stop_started_at = None
+
+    def pre_turn_stop_step(self, now: float, duration: float, label: str):
+        if self.pre_turn_stop_started_at is None:
+            self.pre_turn_stop_started_at = now
+        if now - self.pre_turn_stop_started_at < duration:
+            return Action_Step(Motion_Command(label=label))
+        return None
 
     def key(self):
         # 동일 클래스 행동은 기본적으로 같은 상태 전환 대상으로 비교한다.
