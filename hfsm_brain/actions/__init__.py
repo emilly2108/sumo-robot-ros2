@@ -17,6 +17,7 @@ from .navigation import (
     Green_Sensor_Follow_Action,
     Green_Follow_Action,
     Wall_Avoid_Action,
+    Wall_Verify_Action,
 )
 
 from .opening import Opening_Action
@@ -43,4 +44,5 @@ __all__ = [
     "Opening_Action",
     "Back_Single_Boost_Action",
     "Wall_Avoid_Action",
+    "Wall_Verify_Action",
 ]

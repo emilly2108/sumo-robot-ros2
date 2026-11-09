@@ -16,16 +16,17 @@ motor_node.py   -> CANopen 모터 4개
 ```
 
 `vision_node.py`는 현재 D435i 컬러·깊이 스트림만 사용하며 IMU 토픽은 발행하지 않습니다.
-`switch_node.py`는 테스트용으로 GPIO 스위치 입력과 관계없이 `switch_mode=True`를 요청합니다.
-실행하면 Brain이 곧바로 동작하므로 바퀴를 띄우고 시험하세요.
+`switch_node.py`는 GPIO27의 FIGHT와 GPIO23의 READY 입력을 읽어 Brain 모드를 전환합니다.
+실행 전에 스위치를 READY로 두고 바퀴를 띄운 상태에서 확인하세요.
 
 HFSM brain이 켜진 뒤에는
 벽 회피를 먼저 판단하고, 벽이 없으면 초록색 추격, 컬러 센서 패턴 행동, 기본 주행
 순서로 판단합니다. 실제 동작 우선순위와 센서 조합은 아래 표로 정리했습니다.
 
-현재 기본 발행 주기는 Brain `/cmd_vel` 20Hz, 비전 처리·발행 10Hz, 컬러 센서 10Hz,
-모터 CAN 전송 20Hz입니다. 모터가 `command-ready`가 아니면 주기를 낮춰도 명령은
-거부되므로, 그 경우에는 모터 노드의 CANopen 상태와 fault를 별도로 확인해야 합니다.
+Brain, 카메라, 컬러 센서, 모터의 주요 설정은 `hfsm_brain/robot_settings.yaml`에서
+관리합니다. 실제 주기는 해당 파일의 `control_period`, `stream_fps`, `loop_delay_sec`,
+`can_period_sec` 값을 기준으로 확인하세요. 모터가 `command-ready`가 아니면 주기를
+낮춰도 명령은 거부되므로, CANopen 상태와 fault를 별도로 확인해야 합니다.
 
 ## 센서 위치와 값
 
@@ -107,6 +108,11 @@ HFSM brain이 켜진 뒤에는
 - `color_node.py`: TCS34725 컬러 센서 입력 및 색상 분류
 - `motor_node.py`: `/cmd_vel`을 CANopen 모터 명령으로 변환
 - `switch_node.py`: GPIO 물리 스위치와 `switch_mode` 서비스 연결
+- `canopen_drive.py`: 모터 CANopen 통신·초기화 보조 모듈
+- `hfsm_brain/robot_settings.yaml`: Brain·Vision·Color·Motor 설정
+- `hfsm_brain/robot_settings.py`: YAML 설정 로드와 키 검증
+- `green_center_timing.py`: 초록색 중심 복귀 시간 측정용 진단 노드
+- `main_switch_supervisor.py`: ROS 시작·정지 GPIO 감독 도구
 - `PROJECT_STATUS.html`: 파일별 역할, 토픽 흐름, 색상 패턴별 동작 정리
 
 ## 준비 환경
@@ -115,7 +121,7 @@ HFSM brain이 켜진 뒤에는
 - ROS 2 Jazzy
 - Intel RealSense SDK와 D435i
 - `rclpy`, `geometry_msgs`, `std_msgs`, `std_srvs`
-- `numpy`, `opencv-python`, `pyrealsense2`
+- `numpy`, `opencv-python`, `pyrealsense2`, `PyYAML`
 - 컬러 센서와 모터에 필요한 GPIO, SMBus, CANopen Python 의존성
 
 각 장치의 실제 포트와 라이브러리 설치 상태는 사용하는 라즈베리 파이 환경에 맞춰
@@ -124,17 +130,18 @@ HFSM brain이 켜진 뒤에는
 
 ## 실행 예시
 
-각 노드는 별도 터미널에서 실행합니다.
+소스 파일은 패키지 상대 import를 사용하므로 ROS 패키지의 바깥 디렉터리에서
+모듈 방식으로 실행합니다. 각 노드는 별도 터미널에서 실행합니다.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd ~/ros2_ws/src/sumo_robot/sumo_robot
+cd ~/ros2_ws/src/sumo_robot
 
-python3 vision_node.py
-python3 color_node.py
-python3 motor_node.py
-python3 -m hfsm_brain.node
-python3 switch_node.py
+python3 -m sumo_robot.vision_node
+python3 -m sumo_robot.color_node
+python3 -m sumo_robot.motor_node
+python3 -m sumo_robot.hfsm_brain.node
+python3 -m sumo_robot.switch_node
 ```
 
 실행 전 카메라, I2C 컬러 센서, CAN 인터페이스를 연결하고 모터를 들어 올린

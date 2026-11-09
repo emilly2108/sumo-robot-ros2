@@ -1,14 +1,18 @@
+from dataclasses import fields
+from .robot_settings import load_section
+
 import json
+import math
+import time
 
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Vector3Stamped
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import SetBool
 
 from .actions import (
     Action,
-    All_Blue_Recovery_Action,
     All_Red_Recovery_Action,
     Cruise_Action,
     Far_Green_Turn_Action,
@@ -21,6 +25,7 @@ from .actions import (
     Opening_Action,
     Back_Single_Boost_Action,
     Wall_Avoid_Action,
+    Wall_Verify_Action,
 )
 from .helpers import now_seconds, wall_avoid_direction
 from .models import (
@@ -32,15 +37,32 @@ from .models import (
     World_Model,
 )
 
-class Hfsm_Brain_Node(Node):
+class HFSMBrainNode(Node):
     def __init__(self):
-        super().__init__("brain_hfsm_node")
-        self.config = Brain_Config()
+        super().__init__("hfsm_brain_node")
+        settings = load_section("brain", (field.name for field in fields(Brain_Config)))
+        self.config = Brain_Config(**settings)
+        if any(not math.isfinite(speed) or speed <= 0.0
+               for speed in (self.config.turn_speed, self.config.green_turn_speed)):
+            raise ValueError("brain.turn_speed and brain.green_turn_speed must be positive")
+        if not math.isfinite(self.config.color_timeout_sec) or self.config.color_timeout_sec <= 0:
+            raise ValueError("brain.color_timeout_sec must be a positive finite number")
+        if (not math.isfinite(self.config.wall_post_turn_settle_sec)
+                or self.config.wall_post_turn_settle_sec < 0.0
+                or self.config.wall_post_turn_close_samples < 1
+                or self.config.wall_post_turn_clear_samples < 1):
+            raise ValueError("Invalid brain wall post-turn verification settings")
         self.world = World_Model()
+        # 벽을 벗어났다고 확인할 때까지 첫 회피 방향을 기억한다.
+        self.wall_turn_direction = None
+        self.wall_clear_started_at = None
+        self.wall_clear_samples = 0
         self.back_sensor_candidate = Sensor_Color.BLACK
         self.back_sensor_candidate_frames = 0
-        self.back_sensor_stable_frames = 3
+        self.back_sensor_stable_frames = self.config.back_sensor_stable_frames
         self.switch_enabled = False
+        self.last_color_sample_ns = 0
+        self.color_stale_logged = False
         self.opening_done = False
         self.far_green_turn_done = False
         self.active_action: Action = Opening_Action(self.config)
@@ -55,13 +77,7 @@ class Hfsm_Brain_Node(Node):
         )
         self.create_subscription(Bool, "/target_found", self.target_found_callback, 1)
         self.create_subscription(
-            Float32, "/wall_distance", self.wall_distance_callback, 1
-        )
-        self.create_subscription(
-            Float32, "/wall_left_distance", self.wall_left_callback, 1
-        )
-        self.create_subscription(
-            Float32, "/wall_right_distance", self.wall_right_callback, 1
+            Vector3Stamped, "/wall_observation", self.wall_observation_callback, 1
         )
         self.create_subscription(String, "/color_sensor", self.color_sensor_callback, 1)
 
@@ -83,17 +99,73 @@ class Hfsm_Brain_Node(Node):
 
         self.world.target_missing_frames += 1
 
-    def wall_distance_callback(self, msg: Float32) -> None:
-        self.world.wall_distance = float(msg.data)
-        self.world.wall_last_received_at = now_seconds(self)
+    def wall_observation_callback(self, msg: Vector3Stamped) -> None:
+        now = now_seconds(self)
+        stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        if (stamp_ns <= self.world.wall_observation_stamp_ns
+                or stamp_ns > int((now + 0.1) * 1e9)
+                or now - stamp_ns / 1e9 > self.config.wall_timeout):
+            return
+        left = float(msg.vector.x)
+        right = float(msg.vector.y)
+        nearest = float(msg.vector.z)
+        if any(not math.isfinite(value) or value <= 0.0
+               for value in (left, right, nearest)):
+            return
+        self.world.wall_observation_stamp_ns = stamp_ns
+        self.world.wall_observation_seq += 1
+        self.world.wall_input_received_at = now
+        if isinstance(self.active_action, Wall_Avoid_Action):
+            return
 
-    def wall_left_callback(self, msg: Float32) -> None:
-        self.world.wall_left_distance = float(msg.data)
-        self.world.wall_last_received_at = now_seconds(self)
+        if now - self.world.wall_last_received_at > self.config.wall_timeout:
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+        self.world.wall_distance = nearest
+        self.world.wall_left_distance = left
+        self.world.wall_right_distance = right
+        self.world.wall_last_received_at = now
 
-    def wall_right_callback(self, msg: Float32) -> None:
-        self.world.wall_right_distance = float(msg.data)
-        self.world.wall_last_received_at = now_seconds(self)
+        # 회전 도중 잠깐 벽이 안 보이는 것으로 방향 기억을 풀지 않는다.
+        if (
+            self.wall_turn_direction is None
+            or isinstance(self.active_action, Wall_Verify_Action)
+            or wall_avoid_direction(self.world, self.config) is not None
+        ):
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            return
+
+        if self.wall_clear_started_at is None:
+            self.wall_clear_started_at = now
+        self.wall_clear_samples += 1
+        # 제어 루프 횟수가 아니라 새 좌우 측정값으로 해제를 확인한다.
+        if self.wall_clear_samples >= self.config.wall_clear_samples and now - self.wall_clear_started_at >= self.config.wall_clear_duration:
+            self.wall_turn_direction = None
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            self.get_logger().info("WALL_DIRECTION_RELEASED: clear wall readings confirmed")
+
+    def get_wall_turn_direction(self):
+        direction = wall_avoid_direction(self.world, self.config)
+        if direction is None:
+            return None
+        if self.wall_turn_direction is None:
+            # 이미 회전 중이라면 그 행동이 선택한 방향을 이어 간다.
+            self.wall_turn_direction = (
+                self.active_action.direction
+                if isinstance(self.active_action, Wall_Avoid_Action)
+                else direction
+            )
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            side = "LEFT" if self.wall_turn_direction > 0.0 else "RIGHT"
+            self.get_logger().info(
+                f"WALL_DIRECTION_LOCKED={side} "
+                f"L={self.world.wall_left_distance:.2f}m "
+                f"R={self.world.wall_right_distance:.2f}m"
+            )
+        return self.wall_turn_direction
 
     def switch_mode_callback(self, request: SetBool.Request, response: SetBool.Response):
         enabled = bool(request.data)
@@ -108,6 +180,9 @@ class Hfsm_Brain_Node(Node):
         if enabled:
             self.opening_done = False
             self.far_green_turn_done = False
+            self.wall_turn_direction = None
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
             self.active_action.exit(cancelled=True)
             self.active_action = Opening_Action(self.config)
             self.active_action.enter(now_seconds(self), self.world)
@@ -150,6 +225,24 @@ class Hfsm_Brain_Node(Node):
             )
             return
 
+        if set(batch) != set(sensor_by_position):
+            self.get_logger().warning("Ignored incomplete /color_sensor batch")
+            return
+
+        valid = data.get("valid")
+        sample_ns = data.get("sample_monotonic_ns")
+        if not isinstance(valid, bool) or isinstance(sample_ns, bool) or not isinstance(sample_ns, int):
+            self.get_logger().warning("Ignored /color_sensor batch without validity or sample time")
+            return
+        if not valid:
+            # Values are retained for diagnostics, but not treated as a new sample.
+            return
+        sample_age_ns = time.monotonic_ns() - sample_ns
+        if (sample_ns <= self.last_color_sample_ns or sample_age_ns < 0
+                or sample_age_ns > self.config.color_timeout_sec * 1e9):
+            self.get_logger().warning("Ignored old or out-of-order /color_sensor batch")
+            return
+
         updates = {}
         for position, raw_color in batch.items():
             attr_name = sensor_by_position.get(position)
@@ -162,10 +255,11 @@ class Hfsm_Brain_Node(Node):
                 continue
             updates[attr_name] = int(color)
 
-        if updates:
+        if len(updates) == len(sensor_by_position):
             self._set_sensor_values(updates)
+            self.last_color_sample_ns = sample_ns
         else:
-            self.get_logger().warning("Ignored /color_sensor batch without valid sensors")
+            self.get_logger().warning("Ignored /color_sensor batch with invalid sensors")
 
     def _parse_sensor_color(self, raw_color, color_by_name):
         if isinstance(raw_color, bool):
@@ -255,7 +349,7 @@ class Hfsm_Brain_Node(Node):
 
     def refresh_timeouts(self, now: float) -> None:
         # vision_node.py가 보내는 False 프레임 5개를 연속으로 받으면 초록색을 잃은 것으로 본다.
-        if self.world.target_missing_frames >= 5:
+        if self.world.target_missing_frames >= self.config.target_lost_frames:
             self.world.target_found = False
             self.world.target_error = 0.0
             self.world.target_distance = 9.9
@@ -270,6 +364,9 @@ class Hfsm_Brain_Node(Node):
             self.world.wall_distance = self.config.no_wall_distance
             self.world.wall_left_distance = self.config.no_wall_distance
             self.world.wall_right_distance = self.config.no_wall_distance
+            # 수신 중단은 '벽 없음' 확인이 아니다. 기억한 회피 방향은 유지한다.
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
 
     def transition_to(self, next_action: Action, now: float, cancelled: bool = False) -> None:
         if self.active_action.key() == next_action.key():
@@ -288,28 +385,22 @@ class Hfsm_Brain_Node(Node):
         if self.world.target_found:
             return self.choose_green_action()
 
-        # 초록색을 잃은 경우에만 벽을 확인한다. 벽이 보이면 한 번의
-        # Wall_Avoid_Action이 정확히 90도 회전을 끝낸 뒤 다음 판단으로 돌아온다.
-        direction = wall_avoid_direction(self.world, self.config)
-        if direction is not None:
-            return Wall_Avoid_Action(self.config, direction)
-
+        # 초록색이 없으면 실행 가능한 색깔 행동을 일반 벽 회피보다 먼저 고른다.
         event = self.world.sensor_event
-        if event == Sensor_Event.FRONT_BOTH_RED:
+        if event in (Sensor_Event.FRONT_BOTH_RED, Sensor_Event.ALL_RED):
             return Front_Color_Avoid_Action(
                 self.config, Sensor_Color.RED, None, turn_degrees=90
             )
-        if event == Sensor_Event.FRONT_BOTH_BLUE:
+        if event in (Sensor_Event.FRONT_BOTH_BLUE, Sensor_Event.ALL_BLUE):
             return Front_Color_Avoid_Action(
                 self.config, Sensor_Color.BLUE, None, turn_degrees=90
             )
         if event in (Sensor_Event.BACK_RED, Sensor_Event.BACK_BLUE):
             return Back_Single_Boost_Action(self.config, event)
-        if event == Sensor_Event.ALL_RED:
-            return All_Red_Recovery_Action(self.config)
-        if event == Sensor_Event.ALL_BLUE:
-            return All_Blue_Recovery_Action(self.config)
 
+        direction = self.get_wall_turn_direction()
+        if direction is not None:
+            return Wall_Avoid_Action(self.config, direction)
         return Cruise_Action(self.config)
 
     def choose_green_action(self) -> Action:
@@ -318,9 +409,9 @@ class Hfsm_Brain_Node(Node):
         event = self.world.sensor_event
         distance = self.world.target_distance
         # 5 cm 이내는 초근접 전용 안전 규칙을 적용할 거리다.
-        green_close = 0.0 < distance <= 0.05
-        # 1.2 m 이상은 먼 목표를 향한 한 번의 접근 회전을 적용할 거리다.
-        green_far = distance >= 1.2
+        green_close = 0.0 < distance <= self.config.green_close_distance
+        # 1.5 m 이상은 먼 목표를 향한 한 번의 접근 회전을 적용할 거리다.
+        green_far = distance >= self.config.far_green_distance
         front_right_colored = self.world.sensor1 != Sensor_Color.BLACK
         front_left_colored = self.world.sensor2 != Sensor_Color.BLACK
         # 앞 양쪽 색 유무는 초근접 뒤 파랑 예외를 판정하는 데 쓴다.
@@ -343,12 +434,11 @@ class Hfsm_Brain_Node(Node):
         ):
             return Green_Close_Back_Blue_Action(self.config)
 
-        # 세 센서 전체 파랑은 가까우면 최대 속도, 아니면 초록색 추격 속도다.
+        # 세 센서 전체 파랑은 거리와 관계없이 일반 초록색 추격 속도를 쓴다.
         if event == Sensor_Event.ALL_BLUE:
             return Green_Sensor_Follow_Action(self.config)
 
-        # All-red uses the same five-second push and 000 recovery sequence
-        # whether or not a green target is currently visible.
+        # 초록색이 보이는 동안에만 전체 빨강의 5초 밀기 행동을 선택한다.
         if event == Sensor_Event.ALL_RED:
             return All_Red_Recovery_Action(self.config)
 
@@ -357,23 +447,23 @@ class Hfsm_Brain_Node(Node):
         if event in (Sensor_Event.BACK_RED, Sensor_Event.BACK_BLUE):
             return Green_Follow_Action(self.config)
 
-        # 초록색이 40cm 이내이고 앞 양쪽이 빨강이면, 빨강이 사라질 때까지
+        # 초록색이 50cm 이내이고 앞 양쪽이 빨강이면, 빨강이 사라질 때까지
         # 후진한 뒤 일반 초록색 추격으로 돌아가는 전용 행동을 사용한다.
         if event == Sensor_Event.FRONT_BOTH_RED:
-            if 0.0 < distance <= 0.40:
+            if 0.0 < distance <= self.config.front_red_close_distance:
                 return Green_Close_Front_Red_Action(self.config)
             return Front_Color_Avoid_Action(
                 self.config,
                 Sensor_Color.RED,
                 None,
                 interruptible_by_green=False,
-                turn_degrees=90,
+                turn_degrees=45,
             )
 
-        # 앞 양쪽 파랑도 빨강과 같이 40cm 이내에서는 파랑이 사라질 때까지
+        # 앞 양쪽 파랑도 빨강과 같이 50cm 이내에서는 파랑이 사라질 때까지
         # 후진하고, 파랑이 사라지면 초록색 추격으로 돌아간다.
         if event == Sensor_Event.FRONT_BOTH_BLUE:
-            if 0.0 < distance <= 0.40:
+            if 0.0 < distance <= self.config.front_blue_close_distance:
                 return Green_Close_Front_Color_Action(
                     self.config,
                     Sensor_Color.BLUE,
@@ -401,7 +491,9 @@ class Hfsm_Brain_Node(Node):
         # 가까운 목표 중 일반·최대 직진 명령은 전투 속도로 낮춰 충돌 접근을 완화한다.
         if (
             self.world.target_found
-            and 0.0 < self.world.target_distance <= 0.40
+            and 0.0 < self.world.target_distance <= self.config.battle_distance
+            and self.world.sensor1 == Sensor_Color.BLACK
+            and self.world.sensor2 == Sensor_Color.BLACK
             and command.linear in (self.config.base_speed, self.config.max_speed)
             and command.label not in (
                 "GREEN_BACK_RED_MAX",
@@ -432,10 +524,8 @@ class Hfsm_Brain_Node(Node):
         twist.linear.x = max(
             min(command.linear, self.config.max_speed), -self.config.max_speed
         )
-        twist.angular.z = max(
-            min(command.angular, self.config.max_angular_speed),
-            -self.config.max_angular_speed,
-        )
+        angular_limit = max(self.config.turn_speed, self.config.green_turn_speed)
+        twist.angular.z = max(min(command.angular, angular_limit), -angular_limit)
         self.pub_vel.publish(twist)
         self._log_command(command)
 
@@ -470,13 +560,55 @@ class Hfsm_Brain_Node(Node):
             )
             return
 
-        # 초록색이 보이는 동안에는 벽 거리를 없는 것으로 취급한다.
+        color_age_ns = time.monotonic_ns() - self.last_color_sample_ns
+        if (self.last_color_sample_ns == 0 or color_age_ns < 0
+                or color_age_ns > self.config.color_timeout_sec * 1e9):
+            if not self.color_stale_logged:
+                self.get_logger().error("Color sensor data stale; publishing zero velocity")
+                self.color_stale_logged = True
+            self.publish_command(Motion_Command(hard_stop=True, label="COLOR_STALE"), now)
+            return
+        if self.color_stale_logged:
+            self.get_logger().info("Fresh color sensor data restored")
+            self.color_stale_logged = False
+
+        if (self.world.wall_input_received_at == 0.0
+                or now - self.world.wall_input_received_at > self.config.wall_timeout):
+            self.publish_command(Motion_Command(label="WALL_INPUT_STALE"), now)
+            return
+
+        color_events = (
+            Sensor_Event.FRONT_BOTH_RED,
+            Sensor_Event.ALL_RED,
+            Sensor_Event.FRONT_BOTH_BLUE,
+            Sensor_Event.ALL_BLUE,
+            Sensor_Event.BACK_RED,
+            Sensor_Event.BACK_BLUE,
+        )
+        color_detected = self.world.sensor_event in color_events
+        # 앞 센서는 검정으로 돌아온 뒤에도 정지와 회전을 완료해야 한다.
+        color_action_active = isinstance(self.active_action, Front_Color_Avoid_Action) or (
+            isinstance(self.active_action, Back_Single_Boost_Action)
+            and self.world.sensor_event == self.active_action.expected_event
+        )
+
+        # 벽 회전 또는 회전 후 확인 중에도 색깔 행동이 우선한다.
+        if (
+            not self.world.target_found
+            and color_detected
+            and isinstance(self.active_action, (Wall_Avoid_Action, Wall_Verify_Action))
+        ):
+            self.transition_to(self.choose_action(), now, cancelled=True)
+
+        # 초록색이 보이거나 색깔 행동이 진행 중이면 일반 벽 회피는 개입하지 않는다.
         wall_direction = None
-        if not self.world.target_found:
-            wall_direction = wall_avoid_direction(self.world, self.config)
+        if (not self.world.target_found
+                and not isinstance(self.active_action, (Wall_Avoid_Action, Wall_Verify_Action))
+                and not (color_detected or color_action_active)):
+            wall_direction = self.get_wall_turn_direction()
         if (
             wall_direction is not None
-            and not isinstance(self.active_action, Wall_Avoid_Action)
+            and not isinstance(self.active_action, (Wall_Avoid_Action, Wall_Verify_Action))
         ):
             self.transition_to(
                 Wall_Avoid_Action(self.config, wall_direction),
@@ -548,9 +680,37 @@ class Hfsm_Brain_Node(Node):
                 # 같은 초록색 목표에서 이 회전이 반복되지 않도록 완료 기록을 남긴다.
                 self.far_green_turn_done = True
 
-            # 현재 행동이 정상적으로 완료됐으므로 cancelled=False로 종료 처리한다.
+            # 회전 직후에는 직진하지 않고, 새 프레임으로 안전을 확인한다.
+            if isinstance(self.active_action, Wall_Avoid_Action):
+                self.world.wall_distance = self.config.no_wall_distance
+                self.world.wall_left_distance = self.config.no_wall_distance
+                self.world.wall_right_distance = self.config.no_wall_distance
+                self.world.wall_last_received_at = 0.0
+                next_action = Wall_Verify_Action(self.config)
+            elif isinstance(self.active_action, Wall_Verify_Action):
+                if step.command.label == "WALL_VERIFY_CLEAR":
+                    self.wall_turn_direction = None
+                    self.wall_clear_started_at = None
+                    self.wall_clear_samples = 0
+                    self.get_logger().info(
+                        "WALL_VERIFY_CLEAR: "
+                        f"L={self.world.wall_left_distance:.2f}m "
+                        f"R={self.world.wall_right_distance:.2f}m"
+                    )
+                else:
+                    self.wall_turn_direction = None
+                    self.wall_clear_started_at = None
+                    self.wall_clear_samples = 0
+                    self.get_logger().warning(
+                        "WALL_VERIFY_CLOSE: "
+                        f"L={self.world.wall_left_distance:.2f}m "
+                        f"R={self.world.wall_right_distance:.2f}m"
+                    )
+                next_action = self.choose_action()
+            else:
+                next_action = self.choose_action()
             self.active_action.exit(cancelled=False)
-            self.active_action = self.choose_action()
+            self.active_action = next_action
             self.active_action.enter(now, self.world)
 
         # 한 제어 주기에서 세 번 연속 즉시 완료되면 상태 전환 순환 가능성을 알린다.
@@ -558,7 +718,7 @@ class Hfsm_Brain_Node(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = Hfsm_Brain_Node()
+    node = HFSMBrainNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 
@@ -67,6 +66,9 @@ class World_Model:
     wall_left_distance: float = 9.9
     wall_right_distance: float = 9.9
     wall_last_received_at: float = 0.0
+    wall_input_received_at: float = 0.0
+    wall_observation_stamp_ns: int = 0
+    wall_observation_seq: int = 0
 
     # 오른쪽 앞 센서
     sensor1: Sensor_Color = Sensor_Color.BLACK
@@ -83,34 +85,55 @@ class World_Model:
 
 @dataclass(frozen=True)
 class Brain_Config:
-    # 평상시 순항, 목표 추격, 근거리 전투, 최대, 후진 선속도다.
-    base_speed: float = 0.6
-    chase_speed: float = 0.7
-    battle_speed: float = 0.8
-    max_speed: float = 1.0
-    reverse_speed: float = -0.6
+    """robot_settings.yaml 의 brain 섹션과 1:1 로 대응한다. 기본값은 두지 않는다."""
 
-    # 허용할 최대 각속도와 고정 회전 행동 속도다.
-    max_angular_speed: float = 2.0
-    turn_speed: float = 0.8
-    kp: float = 1.8
-    deadzone: float = 0.03
+    # 오프닝·평상시 순항, 목표 추격, 근거리 전투, 최대, 후진 선속도(m/s)다.
+    opening_speed: float
+    base_speed: float
+    chase_speed: float
+    battle_speed: float
+    max_speed: float
+    reverse_speed: float
 
-    # 목표가 가깝다고 보는 거리와 벽 회피를 시작할 거리다.
-    opponent_close_distance: float = 0.50
-    wall_close_distance: float = 0.20
-    no_wall_distance: float = 9.9
+    # 정해진 45/90도 회전 속도와 초록색 추종 조향 상한(rad/s)이다.
+    turn_speed: float
+    green_turn_speed: float
+    # 초록 추적 비례 조향 이득과 중심 불감대다.
+    kp: float
+    deadzone: float
 
-    # HFSM 제어 루프를 0.05초로 실행해 /cmd_vel을 초당 20회 발행한다.
-    control_period: float = 0.05
+    # 목표가 가깝다고 보는 거리와 벽 회피를 시작할 거리, 벽 없음 관례값(m)이다.
+    opponent_close_distance: float
+    wall_close_distance: float
+    no_wall_distance: float
+
+    # 제어 루프 주기(초)다.
+    control_period: float
+    # 마지막 유효 컬러 측정값의 허용 나이(초)다.
+    color_timeout_sec: float
     # 기준 거리 10cm
-    short_distance: float = 0.10
-    turn_45_duration: float = (math.pi / 4.0) / 0.8
-    turn_90_duration: float = (math.pi / 2.0) / 0.8
-    # 후진 할지 말지 결정하는 5초
-    all_color_push_duration: float = 5.0
-    # 실제 벽 토픽을 이 시간 이상 받지 못하면 벽 정보를 오래된 것으로 본다.
-    wall_timeout: float = 0.5
+    short_distance: float
+    # 45도·90도 회전에 필요한 시간(초)이다.
+    turn_45_duration: float
+    turn_90_duration: float
+    # 회전 명령 전에 속도 0을 유지할 시간(초)이다.
+    pre_turn_stop_duration: float
+    # 후진 할지 말지 결정하는 시간(초)이다.
+    all_color_push_duration: float
+    # 벽 토픽을 이 시간 이상 받지 못하면 벽 정보를 오래된 것으로 본다(초).
+    wall_timeout: float
+    wall_post_turn_settle_sec: float
+    wall_post_turn_close_samples: int
+    wall_post_turn_clear_samples: int
+    green_close_distance: float
+    far_green_distance: float
+    front_red_close_distance: float
+    front_blue_close_distance: float
+    battle_distance: float
+    target_lost_frames: int
+    wall_clear_samples: int
+    wall_clear_duration: float
+    back_sensor_stable_frames: int
 
 
 @dataclass(frozen=True)

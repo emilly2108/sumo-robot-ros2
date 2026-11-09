@@ -1,0 +1,84 @@
+# 로봇을 정지한 뒤 수정하고, 적용하려면 관련 노드를 다시 시작하세요.
+# 거리 단위는 m, 속도는 m/s 또는 rad/s, 시간은 초입니다.
+
+brain:
+  opening_speed: 0.7  # 오프닝 회전 후 직진 속도 (m/s)
+  base_speed: 0.7  # 평소 직진 속도 (m/s)
+  chase_speed: 0.7  # 초록색 추격 속도 (m/s)
+  battle_speed: 1.0 # 가까운 상대를 밀 때 속도 (m/s)
+  max_speed: 1.0  # 센서 행동의 최고 속도 (m/s)
+  reverse_speed: -0.7  # 공통 후진 속도 (m/s)
+  turn_speed: 6.0  # 정해진 45/90도 회전 각속도 (rad/s)
+  green_turn_speed: 9.7  # 초록색 추종 조향 각속도 상한 (rad/s)
+  kp: 3.0  # 초록색 중심 오차에 곱하는 회전 비례값
+  deadzone: 0.06  # 중심 오차가 이 값보다 작으면 회전하지 않음
+  opponent_close_distance: 0.40  # 상대가 가까운 것으로 보는 거리 (m)
+  wall_close_distance: 0.50  # Brain이 벽 회피를 시작하는 거리 (m)
+  no_wall_distance: 9.9  # 벽을 못 찾았을 때 사용하는 기본 거리 (m)
+  control_period: 0.05  # Brain 제어 명령 발행 주기 (초)(hz)
+  color_timeout_sec: 0.12  # 마지막 유효 컬러 측정 후 이 시간이 지나면 정지 (초)
+  short_distance: 0.10  # 짧은 전진/후진의 목표 거리 (m)
+  turn_45_duration: 0.20  # 45도 회전 명령 유지 시간 (초)
+  turn_90_duration: 0.50  # 90도 회전 명령 유지 시간 (초)
+  pre_turn_stop_duration: 0.5   # 회전 전 잠시 멈추는 시간 (초)
+  all_color_push_duration: 5.0  # 전 센서 동일 색일 때 전진 유지 시간 (초)
+  wall_timeout: 0.5  # 벽 거리 신호의 유효 시간 (초)
+  wall_post_turn_settle_sec: 0.20  # 벽 회전 후 정지하며 새 프레임을 기다리는 시간 (초)
+  wall_post_turn_close_samples: 5  # 재회전 전에 필요한 연속 근접 벽 프레임 수
+  wall_post_turn_clear_samples: 3  # 직진 전에 필요한 연속 벽 없음 프레임 수
+  green_close_distance: 0.05  # 초근접 초록색 판정 거리 (m)
+  far_green_distance: 9.9  # 먼 초록색 판정 거리 (m)
+  front_red_close_distance: 0.5  # 앞 양쪽 빨강 감지 시 근거리 판단 기준 (m)
+  front_blue_close_distance: 9.9  # 앞 양쪽 파랑 감지 시 근거리 판단 기준 (m)
+  battle_distance: 0.40  # 배틀 속도로 전환하는 초록색 거리 (m)
+  target_lost_frames: 5  # 초록색을 놓친 것으로 판단할 연속 프레임 수
+  wall_clear_samples: 5  # 벽이 사라졌다고 판단할 연속 측정 수
+  wall_clear_duration: 0.5  # 벽이 사라진 상태를 유지할 시간 (초)
+  back_sensor_stable_frames: 1  # 뒤 센서 상태를 확정할 연속 입력 수
+
+vision:
+  WIDTH: 424  # 카메라 영상 너비 (픽셀)
+  HEIGHT: 240  # 카메라 영상 높이 (픽셀)
+  WALL_CLOSE_DISTANCE: 0.40  # Vision에서 벽 후보를 찾는 최대 거리 (m)
+  WALL_MIN_PIXELS: 25  # 벽 후보로 인정할 최소 깊이 픽셀 수
+  WALL_VERTICAL_SAMPLES: 10  # 세로 벽 판별에 사용하는 샘플 수
+  WALL_VERTICAL_REQUIRED: 6  # 세로 벽 판별에 필요한 유효 샘플 수
+  WALL_VERTICAL_SPAN: 20  # 세로 판별 구간의 픽셀 간격
+  WALL_VERTICAL_DEPTH_TOLERANCE: 0.03  # 세로 샘플 사이 허용 깊이 차 (m)
+  WALL_VERTICAL_MAX_MISSING: 2  # 세로 판별에서 허용하는 누락 샘플 수
+  WALL_MIN_HEIGHT: 0.05  # 바닥 홈과 구분할 벽의 최소 높이 (m)
+  WALL_MAX_DISTANCE: 4.0  # 벽 후보로 볼 수 있는 최대 깊이 (m)
+  FLOOR_PLANE_TOLERANCE: 0.015  # 바닥 평면에서 허용하는 높이 오차 (m)
+  FLOOR_SAMPLE_STEP: 6  # 바닥 평면 계산 시 픽셀 샘플 간격
+  NO_WALL_DISTANCE: 9.9  # Vision이 벽을 못 찾았을 때 발행할 거리 (m)
+  stream_fps: 60  # 카메라 스트림 요청 프레임 속도 (FPS)
+  green_lower_hsv: [50, 100, 50]  # 초록색 HSV 하한 [H, S, V]
+  green_upper_hsv: [90, 255, 255]  # 초록색 HSV 상한 [H, S, V]
+  green_min_area: 30  # 초록색으로 인정할 최소 면적 (픽셀)
+  target_max_distance: 4.0  # 초록색 목표의 최대 유효 거리 (m)
+  distance_new_weight: 0.7  # 거리 평활화에서 새 측정값의 가중치
+  morphology_kernel_size: 3  # 초록색 마스크 잡음 제거 커널 크기
+
+color:
+  integration_time_ms: 10  # 컬러 센서 빛 적분 시간 (ms)
+  gain: 16  # 컬러 센서 증폭 배율
+  loop_delay_sec: 0.02  # 컬러 센서 3개 전체 묶음 발행 주기 (초)
+  red_r_min: 0.50  # 빨강 판정의 최소 R 비율
+  red_g_max: 0.30  # 빨강 판정의 최대 G 비율
+  red_b_max: 0.30  # 빨강 판정의 최대 B 비율
+  blue_b_min: 0.47  # 파랑 판정의 최소 B 비율
+  blue_r_max: 0.20  # 파랑 판정의 최대 R 비율
+  max_consecutive_failures: 10  # 연속 읽기 실패 시 이전 묶음 발행 후 종료하는 횟수
+
+motor:
+  wheel_base_m: 0.206  # 좌우 바퀴 중심 사이 거리 (m)
+  wheel_radius_m: 0.04  # 바퀴 반지름 (m)
+  encoder_counts_per_motor_rev: 16384  # 모터 1회전당 엔코더 카운트
+  gear_ratio: 8.0  # 모터와 출력축 사이 감속비
+  max_motor_output_rpm: 420.0  # 출력축 최대 회전수 (RPM)
+  node_ids: [1, 2, 3, 4]  # 사용하는 네 모터의 CAN 노드 ID
+  left_node_ids: [1, 3]  # 왼쪽 바퀴의 CAN 노드 ID
+  right_node_ids: [2, 4]  # 오른쪽 바퀴의 CAN 노드 ID
+  can_channel: can0  # SocketCAN 인터페이스 이름
+  can_period_sec: 0.05  # 모터 CAN 명령 발행 주기 (초)
+  sdo_timeout_sec: 0.25  # CANopen SDO 응답 대기 시간 (초)

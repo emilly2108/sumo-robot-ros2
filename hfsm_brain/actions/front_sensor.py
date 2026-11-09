@@ -13,6 +13,7 @@ class Front_Side(Enum):
 class Front_Color_Phase(Enum):
     FORWARD_WITH_ONE = auto()
     BACK_UNTIL_CLEAR = auto()
+    PAUSE_BEFORE_TURN = auto()
     TURN_TO_LATER_SIDE = auto()
 
 class Front_Color_Avoid_Action(Action):
@@ -53,6 +54,7 @@ class Front_Color_Avoid_Action(Action):
         if self.first_side is None:
             self.turn_direction = self._later_side_direction(world)
         self.started_at = now
+        self.reset_pre_turn_stop()
 
     # 두 센서가 거의 동시에 같은 색으로 시작했을 때 더 늦게 감지된 쪽을 정한다.
     def _later_side_direction(self, world: World_Model) -> float:
@@ -143,7 +145,17 @@ class Front_Color_Avoid_Action(Action):
                         f"FRONT_{self.color.name}_BACK_UNTIL_CLEAR",
                     )
                 )
-            # 양쪽 센서가 모두 검정이 됐으므로 나중 감지 방향 회전 단계로 간다.
+            # 양쪽 센서가 모두 검정이 됐으므로 회전 전 정지 단계로 간다.
+            self.phase = Front_Color_Phase.PAUSE_BEFORE_TURN
+
+        if self.phase == Front_Color_Phase.PAUSE_BEFORE_TURN:
+            pause = self.pre_turn_stop_step(
+                now,
+                self.config.pre_turn_stop_duration,
+                f"FRONT_{self.color.name}_PRE_TURN_STOP",
+            )
+            if pause is not None:
+                return pause
             self.phase = Front_Color_Phase.TURN_TO_LATER_SIDE
             # 회전 시간을 측정할 기준 시각을 현재 시간으로 저장한다.
             self.started_at = now

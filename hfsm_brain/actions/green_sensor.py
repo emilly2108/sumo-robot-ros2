@@ -128,7 +128,7 @@ class Green_Close_Back_Blue_Action(Action):
             return Action_Step(Motion_Command(label="GREEN_CLOSE_BACK_BLUE_DONE"), True)
 
         # 초근접 5 cm 조건이 깨져도 일반 초록 판단으로 돌아간다.
-        if not (0.0 < world.target_distance <= 0.05):
+        if not (0.0 < world.target_distance <= self.config.green_close_distance):
             return Action_Step(Motion_Command(label="GREEN_CLOSE_BACK_BLUE_DISTANCE_DONE"), True)
 
         # 앞 양쪽에 모두 색이 있는 경우에만 안전 후진 단계로 바꾼다.

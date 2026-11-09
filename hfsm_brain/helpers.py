@@ -1,6 +1,6 @@
 from typing import Optional
 from rclpy.node import Node
-from .models import Brain_Config, Motion_Command, Sensor_Event, World_Model
+from .models import Brain_Config, Motion_Command, Sensor_Color, Sensor_Event, World_Model
 
 def now_seconds(node: Node) -> float:
     # ROS clock의 나노초를 행동 시간 비교에 쉬운 초 단위 float로 바꾼다.
@@ -17,8 +17,12 @@ def green_follow_command(world: World_Model, config: Brain_Config) -> Motion_Com
         # 뒤 파랑도 같은 최대 속도 추격 규칙을 적용한다.
         speed = config.max_speed
         label = "GREEN_BACK_BLUE_MAX"
-    elif 0.0 < world.target_distance <= 0.40:
-        # 상대가 40 cm 안이면 제어 가능한 전투 속도로 낮춘다.
+    elif (
+        world.sensor1 == Sensor_Color.BLACK
+        and world.sensor2 == Sensor_Color.BLACK
+        and 0.0 < world.target_distance <= config.battle_distance
+    ):
+        # 상대가 battle_distance 안이면 제어 가능한 전투 속도로 낮춘다.
         speed = config.battle_speed
         label = "GREEN_BATTLE"
     else:
@@ -31,7 +35,7 @@ def green_follow_command(world: World_Model, config: Brain_Config) -> Motion_Com
     if abs(world.target_error) < config.deadzone:
         angular = 0.0
     # 비례 제어값이 모터에 과도한 회전 명령을 내지 않도록 포화시킨다.
-    angular = max(min(angular, config.max_angular_speed), -config.max_angular_speed)
+    angular = max(min(angular, config.green_turn_speed), -config.green_turn_speed)
 
     return Motion_Command(speed, angular, False, label)
 
@@ -45,23 +49,19 @@ def green_sensor_follow_command(
     speed = config.chase_speed
     label = "GREEN_SENSOR_CHASE"
     if force_max_speed:
-        # 호출자가 강제 최대 속도를 요청하면 거리 조건보다 우선한다.
+        # 호출자가 강제 최대 속도를 요청한 경우에만 최대 속도를 쓴다.
         speed = config.max_speed
         label = (
             "GREEN_BACK_BLUE_MAX"
             if world.sensor_event == Sensor_Event.BACK_BLUE
             else "GREEN_BACK_RED_MAX"
         )
-    elif 0.0 < world.target_distance <= 0.05:
-        # 센서 전용 근접 추격은 5 cm 안에서 최대 속도를 쓴다.
-        speed = config.max_speed
-        label = "GREEN_SENSOR_MAX"
 
     # 일반 추격과 같은 비례 조향식을 사용한다.
     angular = -config.kp * world.target_error
     if abs(world.target_error) < config.deadzone:
         angular = 0.0
-    angular = max(min(angular, config.max_angular_speed), -config.max_angular_speed)
+    angular = max(min(angular, config.green_turn_speed), -config.green_turn_speed)
 
     return Motion_Command(speed, angular, False, label)
 

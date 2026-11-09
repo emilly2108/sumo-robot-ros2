@@ -1,3 +1,3 @@
-from .node import Hfsm_Brain_Node, main
+from .node import HFSMBrainNode, main
 
-__all__ = ["Hfsm_Brain_Node", "main"]
+__all__ = ["HFSMBrainNode", "main"]
