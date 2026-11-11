@@ -4,6 +4,29 @@
 Intel RealSense D435i 비전 노드, TCS34725 컬러 센서 노드, CANopen 모터 노드,
 물리 스위치 노드와 HFSM 기반 brain 노드를 포함합니다.
 
+## 2차 완성본 (ROS 2 패키지)
+
+현재 업로드한 ROS 2 패키지는 `src/sumo_robot/`에 있습니다. `setup.py`, `package.xml`,
+`launch/sumo_robot.launch.py`, `config/`와 노드 소스를 함께 옮겼습니다.
+저장소 루트의 Python 파일과 아래의 기존 실행 예시·행동표는 1차 버전 참고용으로
+남겨 두었으므로, 2차 패키지의 실제 동작 기준으로 사용하지 마세요.
+
+라즈베리 파이의 ROS 2 작업 공간 `src` 아래에 패키지 디렉터리
+`src/sumo_robot/`를 배치하고 실행합니다. 같은 이름의 패키지를 중복 배치하지 마세요.
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd ~/ros2_ws
+colcon build --packages-select sumo_robot
+source install/setup.bash
+ros2 launch sumo_robot sumo_robot.launch.py enable_motor:=false enable_switch:=false
+```
+
+마지막 명령은 모터와 물리 스위치를 시작하지 않는 점검용입니다. 실제 구동 전에는
+같은 ROS 도메인에 이미 실행 중인 모터 노드가 없는지도 확인하세요.
+`can0`, 카메라, 색상 센서, 전원 차단 수단을 확인하고 바퀴를 띄운 상태에서
+각 노드를 검증하세요. 이 업로드는 소스 동기화이며 실제 로봇 구동 검증은 아닙니다.
+
 ## 실행 구조
 
 ```text
@@ -125,8 +148,8 @@ Brain, 카메라, 컬러 센서, 모터의 주요 설정은 `hfsm_brain/robot_se
 - 컬러 센서와 모터에 필요한 GPIO, SMBus, CANopen Python 의존성
 
 각 장치의 실제 포트와 라이브러리 설치 상태는 사용하는 라즈베리 파이 환경에 맞춰
-확인해야 합니다. 이 저장소는 Python 패키지 설치 파일을 포함하지 않으므로 ROS 2를
-먼저 source한 뒤 실행합니다.
+확인해야 합니다. 아래 직접 실행 예시는 저장소 루트의 1차 코드 기준입니다.
+2차 패키지는 위의 `src/sumo_robot/setup.py`를 사용하여 빌드합니다.
 
 ## 실행 예시
 

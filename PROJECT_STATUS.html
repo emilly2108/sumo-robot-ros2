@@ -57,6 +57,17 @@
   <p class="lead">작성 기준: 현재 코드 폴더의 파일을 기준으로 정리한 문서입니다. 하드웨어를 이 환경에서 직접 실행한 결과가 아니라, 소스 구조와 ROS2 연결을 기준으로 판단했습니다.</p>
 
   <div class="log-entry">
+    <h3>[2026-11-11 23:20] 완성본 2차</h3>
+    <p><strong>변경 유형:</strong> feat</p>
+    <ul>
+      <li><code>src/sumo_robot/setup.py</code>, <code>src/sumo_robot/package.xml</code>, <code>src/sumo_robot/launch/sumo_robot.launch.py</code>: ROS 2 패키지 구성과 실행 파일을 추가했습니다.</li>
+      <li><code>src/sumo_robot/sumo_robot/</code>: 현재 2차 비전, 색상, 스위치, 모터 및 HFSM 소스를 한 패키지로 보존했습니다. Python 캐시는 제외했습니다.</li>
+      <li><code>README.md</code>: 2차 패키지의 위치와 모터를 시작하지 않는 빌드·실행 예시를 추가했습니다. 기존 루트 파일은 1차 참고용으로 유지했습니다.</li>
+      <li>문법과 패키지 파일 형식만 확인했으며, 실제 로봇 하드웨어에서의 동작 검증을 의미하지 않습니다.</li>
+    </ul>
+  </div>
+
+  <div class="log-entry">
     <h3>[2026-11-10 04:20] 현재 씨름 로봇 코드 동기화</h3>
     <p><strong>변경 유형:</strong> chore</p>
     <ul>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <!-- Only loaded by the copied color trial. Keep ROS message QoS unchanged. -->
+    <participant profile_name="color_trial_fast_discovery" is_default_profile="true">
+      <rtps>
+        <builtin>
+          <discovery_config>
+            <leaseAnnouncement><sec>0</sec><nanosec>300000000</nanosec></leaseAnnouncement>
+            <initialAnnouncements>
+              <count>20</count>
+              <period><sec>0</sec><nanosec>100000000</nanosec></period>
+            </initialAnnouncements>
+          </discovery_config>
+        </builtin>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

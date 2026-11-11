@@ -1,0 +1,729 @@
+from dataclasses import fields
+from .robot_settings import load_section
+
+import json
+import math
+import time
+
+import rclpy
+from geometry_msgs.msg import Twist, Vector3Stamped
+from rclpy.node import Node
+from std_msgs.msg import Bool, Float32, String
+from std_srvs.srv import SetBool
+
+from .actions import (
+    Action,
+    All_Red_Recovery_Action,
+    Cruise_Action,
+    Far_Green_Turn_Action,
+    Front_Color_Avoid_Action,
+    Green_Close_Back_Blue_Action,
+    Green_Close_Front_Color_Action,
+    Green_Close_Front_Red_Action,
+    Green_Follow_Action,
+    Green_Sensor_Follow_Action,
+    Opening_Action,
+    Back_Single_Boost_Action,
+    Wall_Avoid_Action,
+    Wall_Verify_Action,
+)
+from .helpers import now_seconds, wall_avoid_direction
+from .models import (
+    SENSOR_EVENTS,
+    Brain_Config,
+    Motion_Command,
+    Sensor_Color,
+    Sensor_Event,
+    World_Model,
+)
+
+class HFSMBrainNode(Node):
+    def __init__(self):
+        super().__init__("hfsm_brain_node")
+        settings = load_section("brain", (field.name for field in fields(Brain_Config)))
+        self.config = Brain_Config(**settings)
+        if any(not math.isfinite(speed) or speed <= 0.0
+               for speed in (self.config.turn_speed, self.config.green_turn_speed)):
+            raise ValueError("brain.turn_speed and brain.green_turn_speed must be positive")
+        if not math.isfinite(self.config.color_timeout_sec) or self.config.color_timeout_sec <= 0:
+            raise ValueError("brain.color_timeout_sec must be a positive finite number")
+        if (not math.isfinite(self.config.wall_post_turn_settle_sec)
+                or self.config.wall_post_turn_settle_sec < 0.0
+                or self.config.wall_post_turn_close_samples < 1
+                or self.config.wall_post_turn_clear_samples < 1):
+            raise ValueError("Invalid brain wall post-turn verification settings")
+        self.world = World_Model()
+        # 벽을 벗어났다고 확인할 때까지 첫 회피 방향을 기억한다.
+        self.wall_turn_direction = None
+        self.wall_clear_started_at = None
+        self.wall_clear_samples = 0
+        self.back_sensor_candidate = Sensor_Color.BLACK
+        self.back_sensor_candidate_frames = 0
+        self.back_sensor_stable_frames = self.config.back_sensor_stable_frames
+        self.switch_enabled = False
+        self.last_color_sample_ns = 0
+        self.color_stale_logged = False
+        self.opening_done = False
+        self.far_green_turn_done = False
+        self.active_action: Action = Opening_Action(self.config)
+        self.active_action.enter(now_seconds(self), self.world)
+
+        self.pub_vel = self.create_publisher(Twist, "/cmd_vel", 1)
+        self.create_service(SetBool, "switch_mode", self.switch_mode_callback)
+
+        self.create_subscription(Float32, "/target_error", self.target_error_callback, 1)
+        self.create_subscription(
+            Float32, "/target_distance", self.target_distance_callback, 1
+        )
+        self.create_subscription(Bool, "/target_found", self.target_found_callback, 1)
+        self.create_subscription(
+            Vector3Stamped, "/wall_observation", self.wall_observation_callback, 1
+        )
+        self.create_subscription(String, "/color_sensor", self.color_sensor_callback, 1)
+
+        self.last_command_state = None
+        self.timer = self.create_timer(self.config.control_period, self.control_loop)
+        self.get_logger().info("HFSM brain started: action=OPENING")
+
+    def target_error_callback(self, msg: Float32) -> None:
+        self.world.target_error = float(msg.data)
+
+    def target_distance_callback(self, msg: Float32) -> None:
+        self.world.target_distance = float(msg.data)
+
+    def target_found_callback(self, msg: Bool) -> None:
+        if msg.data:
+            self.world.target_found = True
+            self.world.target_missing_frames = 0
+            return
+
+        self.world.target_missing_frames += 1
+
+    def wall_observation_callback(self, msg: Vector3Stamped) -> None:
+        now = now_seconds(self)
+        stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        if (stamp_ns <= self.world.wall_observation_stamp_ns
+                or stamp_ns > int((now + 0.1) * 1e9)
+                or now - stamp_ns / 1e9 > self.config.wall_timeout):
+            return
+        left = float(msg.vector.x)
+        right = float(msg.vector.y)
+        nearest = float(msg.vector.z)
+        if any(not math.isfinite(value) or value <= 0.0
+               for value in (left, right, nearest)):
+            return
+        self.world.wall_observation_stamp_ns = stamp_ns
+        self.world.wall_observation_seq += 1
+        self.world.wall_input_received_at = now
+        if isinstance(self.active_action, Wall_Avoid_Action):
+            return
+
+        if now - self.world.wall_last_received_at > self.config.wall_timeout:
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+        self.world.wall_distance = nearest
+        self.world.wall_left_distance = left
+        self.world.wall_right_distance = right
+        self.world.wall_last_received_at = now
+
+        # 회전 도중 잠깐 벽이 안 보이는 것으로 방향 기억을 풀지 않는다.
+        if (
+            self.wall_turn_direction is None
+            or isinstance(self.active_action, Wall_Verify_Action)
+            or wall_avoid_direction(self.world, self.config) is not None
+        ):
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            return
+
+        if self.wall_clear_started_at is None:
+            self.wall_clear_started_at = now
+        self.wall_clear_samples += 1
+        # 제어 루프 횟수가 아니라 새 좌우 측정값으로 해제를 확인한다.
+        if self.wall_clear_samples >= self.config.wall_clear_samples and now - self.wall_clear_started_at >= self.config.wall_clear_duration:
+            self.wall_turn_direction = None
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            self.get_logger().info("WALL_DIRECTION_RELEASED: clear wall readings confirmed")
+
+    def get_wall_turn_direction(self):
+        direction = wall_avoid_direction(self.world, self.config)
+        if direction is None:
+            return None
+        if self.wall_turn_direction is None:
+            # 이미 회전 중이라면 그 행동이 선택한 방향을 이어 간다.
+            self.wall_turn_direction = (
+                self.active_action.direction
+                if isinstance(self.active_action, Wall_Avoid_Action)
+                else direction
+            )
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            side = "LEFT" if self.wall_turn_direction > 0.0 else "RIGHT"
+            self.get_logger().info(
+                f"WALL_DIRECTION_LOCKED={side} "
+                f"L={self.world.wall_left_distance:.2f}m "
+                f"R={self.world.wall_right_distance:.2f}m"
+            )
+        return self.wall_turn_direction
+
+    def switch_mode_callback(self, request: SetBool.Request, response: SetBool.Response):
+        enabled = bool(request.data)
+
+        if enabled == self.switch_enabled:
+            response.success = True
+            response.message = "Brain mode is already " + ("ON" if enabled else "OFF")
+            return response
+
+        self.switch_enabled = enabled
+
+        if enabled:
+            self.opening_done = False
+            self.far_green_turn_done = False
+            self.wall_turn_direction = None
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+            self.active_action.exit(cancelled=True)
+            self.active_action = Opening_Action(self.config)
+            self.active_action.enter(now_seconds(self), self.world)
+            response.message = "Brain mode enabled; opening action restarted"
+        else:
+            self.active_action.exit(cancelled=True)
+            response.message = "Brain mode disabled; soft stop requested"
+
+        response.success = True
+        return response
+
+    def color_sensor_callback(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data)
+        except (TypeError, json.JSONDecodeError):
+            self.get_logger().warning(
+                f"Ignored invalid /color_sensor JSON: {msg.data!r}"
+            )
+            return
+
+        if not isinstance(data, dict):
+            self.get_logger().warning("Ignored /color_sensor message that is not an object")
+            return
+
+        sensor_by_position = {
+            "front_right": "sensor1",
+            "front_left": "sensor2",
+            "back": "sensor3",
+        }
+        color_by_name = {
+            "BLACK": Sensor_Color.BLACK,
+            "RED": Sensor_Color.RED,
+            "BLUE": Sensor_Color.BLUE,
+        }
+
+        batch = data.get("sensors")
+        if not isinstance(batch, dict):
+            self.get_logger().warning(
+                "Ignored /color_sensor message; expected {'sensors': {...}} batch"
+            )
+            return
+
+        if set(batch) != set(sensor_by_position):
+            self.get_logger().warning("Ignored incomplete /color_sensor batch")
+            return
+
+        valid = data.get("valid")
+        sample_ns = data.get("sample_monotonic_ns")
+        if not isinstance(valid, bool) or isinstance(sample_ns, bool) or not isinstance(sample_ns, int):
+            self.get_logger().warning("Ignored /color_sensor batch without validity or sample time")
+            return
+        if not valid:
+            # Values are retained for diagnostics, but not treated as a new sample.
+            return
+        sample_age_ns = time.monotonic_ns() - sample_ns
+        if (sample_ns <= self.last_color_sample_ns or sample_age_ns < 0
+                or sample_age_ns > self.config.color_timeout_sec * 1e9):
+            self.get_logger().warning("Ignored old or out-of-order /color_sensor batch")
+            return
+
+        updates = {}
+        for position, raw_color in batch.items():
+            attr_name = sensor_by_position.get(position)
+            color = self._parse_sensor_color(raw_color, color_by_name)
+            if attr_name is None or color is None:
+                self.get_logger().warning(
+                    f"Ignored /color_sensor batch value: position={position!r}, "
+                    f"color={raw_color!r}"
+                )
+                continue
+            updates[attr_name] = int(color)
+
+        if len(updates) == len(sensor_by_position):
+            self._set_sensor_values(updates)
+            self.last_color_sample_ns = sample_ns
+        else:
+            self.get_logger().warning("Ignored /color_sensor batch with invalid sensors")
+
+    def _parse_sensor_color(self, raw_color, color_by_name):
+        if isinstance(raw_color, bool):
+            return None
+        if isinstance(raw_color, (int, float)) and float(raw_color).is_integer():
+            try:
+                return Sensor_Color(int(raw_color))
+            except ValueError:
+                return None
+
+        color_name = str(raw_color or "").upper()
+        color = color_by_name.get(color_name)
+        if color is None and color_name in {"0", "1", "2"}:
+            return Sensor_Color(int(color_name))
+        return color
+
+    def _set_sensor_values(self, values) -> None:
+        parsed_values = {}
+        for attr_name, value in values.items():
+            if attr_name not in {"sensor1", "sensor2", "sensor3"}:
+                self.get_logger().warning(f"Ignored unknown sensor attribute {attr_name!r}")
+                continue
+            try:
+                parsed_values[attr_name] = Sensor_Color(value)
+            except ValueError:
+                self.get_logger().warning(
+                    f"Ignored invalid sensor value {value}; use BLACK=0, RED=1, BLUE=2"
+                )
+
+        if not parsed_values:
+            return
+
+        # Apply only a stable rear sample. Front sensors remain immediate.
+        if "sensor3" in parsed_values:
+            rear_color = parsed_values["sensor3"]
+            if rear_color == self.back_sensor_candidate:
+                self.back_sensor_candidate_frames += 1
+            else:
+                self.back_sensor_candidate = rear_color
+                self.back_sensor_candidate_frames = 1
+
+            if self.back_sensor_candidate_frames < self.back_sensor_stable_frames:
+                del parsed_values["sensor3"]
+
+        if not parsed_values:
+            return
+        previous_event = self.world.sensor_event
+        previous_values = (
+            self.world.sensor1,
+            self.world.sensor2,
+            self.world.sensor3,
+        )
+        detected_at = now_seconds(self)
+        for attr_name, color in parsed_values.items():
+            previous_color = getattr(self.world, attr_name)
+            if (
+                attr_name == "sensor1"
+                and color != Sensor_Color.BLACK
+                and color != previous_color
+            ):
+                self.world.sensor1_detected_at = detected_at
+            if (
+                attr_name == "sensor2"
+                and color != Sensor_Color.BLACK
+                and color != previous_color
+            ):
+                self.world.sensor2_detected_at = detected_at
+            setattr(self.world, attr_name, color)
+
+        self.world.sensor_event = SENSOR_EVENTS.get(
+            (self.world.sensor1, self.world.sensor2, self.world.sensor3),
+            Sensor_Event.UNKNOWN,
+        )
+        self.world.sensor_updated_at = detected_at
+
+        current_values = (
+            self.world.sensor1,
+            self.world.sensor2,
+            self.world.sensor3,
+        )
+        if current_values != previous_values or self.world.sensor_event != previous_event:
+            self.get_logger().info(
+                f"COLOR_INPUT={tuple(int(color) for color in current_values)} "
+                f"SENSOR_EVENT={self.world.sensor_event.name} "
+                f"green={self.world.target_found}"
+            )
+
+    def refresh_timeouts(self, now: float) -> None:
+        # vision_node.py가 보내는 False 프레임 5개를 연속으로 받으면 초록색을 잃은 것으로 본다.
+        if self.world.target_missing_frames >= self.config.target_lost_frames:
+            self.world.target_found = False
+            self.world.target_error = 0.0
+            self.world.target_distance = 9.9
+            self.far_green_turn_done = False
+            self.world.target_missing_frames = 0
+
+        wall_is_stale = (
+            self.world.wall_last_received_at == 0.0
+            or now - self.world.wall_last_received_at > self.config.wall_timeout
+        )
+        if wall_is_stale:
+            self.world.wall_distance = self.config.no_wall_distance
+            self.world.wall_left_distance = self.config.no_wall_distance
+            self.world.wall_right_distance = self.config.no_wall_distance
+            # 수신 중단은 '벽 없음' 확인이 아니다. 기억한 회피 방향은 유지한다.
+            self.wall_clear_started_at = None
+            self.wall_clear_samples = 0
+
+    def transition_to(self, next_action: Action, now: float, cancelled: bool = False) -> None:
+        if self.active_action.key() == next_action.key():
+            return
+        old_name = self.active_action.name
+        # 기존 행동에 정상 종료인지 강제 취소인지 알려 정리할 기회를 준다.
+        self.active_action.exit(cancelled)
+        # 현재 활성 행동 참조를 새 행동 객체로 교체한다.
+        self.active_action = next_action
+        # 새 행동의 단계와 시작 시각을 현재 World Model로 초기화한다.
+        self.active_action.enter(now, self.world)
+        self.get_logger().info(f"HFSM: {old_name} -> {self.active_action.name}")
+
+    def choose_action(self) -> Action:
+        # 목표가 보이면 벽 판단을 끈 상태로 초록+색상 세부 규칙을 적용한다.
+        if self.world.target_found:
+            return self.choose_green_action()
+
+        # 초록색이 없으면 실행 가능한 색깔 행동을 일반 벽 회피보다 먼저 고른다.
+        event = self.world.sensor_event
+        if event in (Sensor_Event.FRONT_BOTH_RED, Sensor_Event.ALL_RED):
+            return Front_Color_Avoid_Action(
+                self.config, Sensor_Color.RED, None, turn_degrees=90
+            )
+        if event in (Sensor_Event.FRONT_BOTH_BLUE, Sensor_Event.ALL_BLUE):
+            return Front_Color_Avoid_Action(
+                self.config, Sensor_Color.BLUE, None, turn_degrees=90
+            )
+        if event in (Sensor_Event.BACK_RED, Sensor_Event.BACK_BLUE):
+            return Back_Single_Boost_Action(self.config, event)
+
+        direction = self.get_wall_turn_direction()
+        if direction is not None:
+            return Wall_Avoid_Action(self.config, direction)
+        return Cruise_Action(self.config)
+
+    def choose_green_action(self) -> Action:
+        """초록색이 보일 때 거리와 센서 패턴에 맞는 행동을 선택한다."""
+        # 현재 세 색상 센서를 하나의 사건 값으로 읽는다.
+        event = self.world.sensor_event
+        distance = self.world.target_distance
+        # 5 cm 이내는 초근접 전용 안전 규칙을 적용할 거리다.
+        green_close = 0.0 < distance <= self.config.green_close_distance
+        # 1.5 m 이상은 먼 목표를 향한 한 번의 접근 회전을 적용할 거리다.
+        green_far = distance >= self.config.far_green_distance
+        front_right_colored = self.world.sensor1 != Sensor_Color.BLACK
+        front_left_colored = self.world.sensor2 != Sensor_Color.BLACK
+        # 앞 양쪽 색 유무는 초근접 뒤 파랑 예외를 판정하는 데 쓴다.
+        front_both_colored = front_right_colored and front_left_colored
+
+        # With both front sensors clear, a far green target starts one fixed
+        # left 45-degree turn and a short straight move before normal chasing.
+        # 앞이 비어 있고 목표가 멀면 한 번만 45도 회전과 짧은 전진을 실행한다.
+        if green_far and not front_right_colored and not front_left_colored:
+            if not self.far_green_turn_done:
+                return Far_Green_Turn_Action(self.config)
+
+        # 뒤 파랑이 유지되는 중 앞 양쪽에 색이 함께 나타나면 먼저 안전하게 후진한다.
+        # ALL_BLUE는 아래에서 일반적인 전체 파랑 초록색 행동으로 처리한다.
+        if (
+            green_close
+            and self.world.sensor3 == Sensor_Color.BLUE
+            and front_both_colored
+            and event != Sensor_Event.ALL_BLUE
+        ):
+            return Green_Close_Back_Blue_Action(self.config)
+
+        # 세 센서 전체 파랑은 거리와 관계없이 일반 초록색 추격 속도를 쓴다.
+        if event == Sensor_Event.ALL_BLUE:
+            return Green_Sensor_Follow_Action(self.config)
+
+        # 초록색이 보이는 동안에만 전체 빨강의 5초 밀기 행동을 선택한다.
+        if event == Sensor_Event.ALL_RED:
+            return All_Red_Recovery_Action(self.config)
+
+        # 초록색을 보면서 뒤 센서가 빨강 또는 파랑이면 행동을 바꾸지 않는다.
+        # Green_Follow_Action이 뒤 센서 이벤트를 보고 최대 추격 속도를 선택한다.
+        if event in (Sensor_Event.BACK_RED, Sensor_Event.BACK_BLUE):
+            return Green_Follow_Action(self.config)
+
+        # 초록색이 50cm 이내이고 앞 양쪽이 빨강이면, 빨강이 사라질 때까지
+        # 후진한 뒤 일반 초록색 추격으로 돌아가는 전용 행동을 사용한다.
+        if event == Sensor_Event.FRONT_BOTH_RED:
+            if 0.0 < distance <= self.config.front_red_close_distance:
+                return Green_Close_Front_Red_Action(self.config)
+            return Front_Color_Avoid_Action(
+                self.config,
+                Sensor_Color.RED,
+                None,
+                interruptible_by_green=False,
+                turn_degrees=45,
+            )
+
+        # 앞 양쪽 파랑도 빨강과 같이 50cm 이내에서는 파랑이 사라질 때까지
+        # 후진하고, 파랑이 사라지면 초록색 추격으로 돌아간다.
+        if event == Sensor_Event.FRONT_BOTH_BLUE:
+            if 0.0 < distance <= self.config.front_blue_close_distance:
+                return Green_Close_Front_Color_Action(
+                    self.config,
+                    Sensor_Color.BLUE,
+                )
+            if green_far:
+                if not self.far_green_turn_done:
+                    return Far_Green_Turn_Action(self.config)
+                return Green_Follow_Action(self.config)
+            return Front_Color_Avoid_Action(
+                self.config,
+                Sensor_Color.BLUE,
+                None,
+                interruptible_by_green=False,
+            )
+        # 앞 한쪽 빨강만 보이면 1.2m 이상에서만 기존 45도 회전을 사용한다.
+        if event in (Sensor_Event.FRONT_RIGHT_RED, Sensor_Event.FRONT_LEFT_RED):
+            if green_far and not self.far_green_turn_done:
+                return Far_Green_Turn_Action(self.config)
+            return Green_Follow_Action(self.config)
+
+        # 앞 한쪽 파랑 또는 000은 별도 회피 없이 기존 초록색 추격을 유지한다.
+        return Green_Follow_Action(self.config)
+
+    def publish_command(self, command: Motion_Command, now: float) -> None:
+        # 가까운 목표 중 일반·최대 직진 명령은 전투 속도로 낮춰 충돌 접근을 완화한다.
+        if (
+            self.world.target_found
+            and 0.0 < self.world.target_distance <= self.config.battle_distance
+            and self.world.sensor1 == Sensor_Color.BLACK
+            and self.world.sensor2 == Sensor_Color.BLACK
+            and command.linear in (self.config.base_speed, self.config.max_speed)
+            and command.label not in (
+                "GREEN_BACK_RED_MAX",
+                "GREEN_BACK_BLUE_MAX",
+                "ALL_RED_MAX_PUSH",
+            )
+        ):
+            command = Motion_Command(
+                linear=self.config.battle_speed,
+                angular=command.angular,
+                hard_stop=command.hard_stop,
+                label="GREEN_BATTLE_OVERRIDE",
+            )
+
+        # 행동이 hard_stop을 요구하면 현재 구현은 서비스 대신 0 Twist를 반복 발행한다.
+        if command.hard_stop:
+            # Hard Stop 서비스 대신 0 속도 명령을 계속 publish한다.
+            # control_loop가 20ms마다 이 함수를 호출하므로 정지 명령도 반복 전송된다.
+            soft_stop = Twist()
+            soft_stop.linear.x = 0.0
+            soft_stop.angular.z = 0.0
+            self.pub_vel.publish(soft_stop)
+            self._log_command(command)
+            return
+
+        # ROS Twist 메시지를 만들고 설정된 절대 속도 범위를 한 번 더 강제한다.
+        twist = Twist()
+        twist.linear.x = max(
+            min(command.linear, self.config.max_speed), -self.config.max_speed
+        )
+        angular_limit = max(self.config.turn_speed, self.config.green_turn_speed)
+        twist.angular.z = max(min(command.angular, angular_limit), -angular_limit)
+        self.pub_vel.publish(twist)
+        self._log_command(command)
+
+    def _log_command(self, command: Motion_Command) -> None:
+        # 속도 값이 조금 달라져도 매 주기 출력하지 않는다. 대신 행동, 명령,
+        # 초록색 발견 여부, 센서 이벤트 중 하나라도 바뀌면 새 상태를 출력한다.
+        command_state = (
+            self.active_action.name,
+            command.label,
+            self.world.target_found,
+            self.world.sensor_event,
+        )
+        if command_state == self.last_command_state:
+            return
+        self.last_command_state = command_state
+        self.get_logger().info(
+            f"ACTION={self.active_action.name} COMMAND={command.label} "
+            f"v={command.linear:.2f} w={command.angular:.2f} "
+            f"green={self.world.target_found} "
+            f"distance={self.world.target_distance:.2f}m "
+            f"sensor={self.world.sensor_event.name}"
+        )
+
+    def control_loop(self) -> None:
+        now = now_seconds(self)
+        self.refresh_timeouts(now)
+
+        if not self.switch_enabled:
+            self.publish_command(
+                Motion_Command(hard_stop=True, label="SWITCH_OFF"),
+                now,
+            )
+            return
+
+        color_age_ns = time.monotonic_ns() - self.last_color_sample_ns
+        if (self.last_color_sample_ns == 0 or color_age_ns < 0
+                or color_age_ns > self.config.color_timeout_sec * 1e9):
+            if not self.color_stale_logged:
+                self.get_logger().error("Color sensor data stale; publishing zero velocity")
+                self.color_stale_logged = True
+            self.publish_command(Motion_Command(hard_stop=True, label="COLOR_STALE"), now)
+            return
+        if self.color_stale_logged:
+            self.get_logger().info("Fresh color sensor data restored")
+            self.color_stale_logged = False
+
+        if (self.world.wall_input_received_at == 0.0
+                or now - self.world.wall_input_received_at > self.config.wall_timeout):
+            self.publish_command(Motion_Command(label="WALL_INPUT_STALE"), now)
+            return
+
+        color_events = (
+            Sensor_Event.FRONT_BOTH_RED,
+            Sensor_Event.ALL_RED,
+            Sensor_Event.FRONT_BOTH_BLUE,
+            Sensor_Event.ALL_BLUE,
+            Sensor_Event.BACK_RED,
+            Sensor_Event.BACK_BLUE,
+        )
+        color_detected = self.world.sensor_event in color_events
+        # 앞 센서는 검정으로 돌아온 뒤에도 정지와 회전을 완료해야 한다.
+        color_action_active = isinstance(self.active_action, Front_Color_Avoid_Action) or (
+            isinstance(self.active_action, Back_Single_Boost_Action)
+            and self.world.sensor_event == self.active_action.expected_event
+        )
+
+        # 벽 회전 또는 회전 후 확인 중에도 색깔 행동이 우선한다.
+        if (
+            not self.world.target_found
+            and color_detected
+            and isinstance(self.active_action, (Wall_Avoid_Action, Wall_Verify_Action))
+        ):
+            self.transition_to(self.choose_action(), now, cancelled=True)
+
+        # 초록색이 보이거나 색깔 행동이 진행 중이면 일반 벽 회피는 개입하지 않는다.
+        wall_direction = None
+        if (not self.world.target_found
+                and not isinstance(self.active_action, (Wall_Avoid_Action, Wall_Verify_Action))
+                and not (color_detected or color_action_active)):
+            wall_direction = self.get_wall_turn_direction()
+        if (
+            wall_direction is not None
+            and not isinstance(self.active_action, (Wall_Avoid_Action, Wall_Verify_Action))
+        ):
+            self.transition_to(
+                Wall_Avoid_Action(self.config, wall_direction),
+                now,
+                cancelled=True,
+            )
+
+
+        front_both_color = self.world.sensor_event in (
+            Sensor_Event.FRONT_BOTH_RED,
+            Sensor_Event.FRONT_BOTH_BLUE,
+        )
+        opening_turning = (
+            isinstance(self.active_action, Opening_Action)
+            and not self.active_action.can_interrupt_for_green()
+        )
+        if (
+            self.world.target_found
+            and wall_direction is None
+            and front_both_color
+            and not isinstance(self.active_action, Wall_Avoid_Action)
+            and not (
+                isinstance(self.active_action, Front_Color_Avoid_Action)
+                and not self.active_action.can_interrupt_for_green()
+            )
+            and not opening_turning
+        ):
+            self.transition_to(self.choose_green_action(), now, cancelled=True)
+
+        if (
+            self.active_action.locked
+            and self.active_action.can_interrupt_for_green()
+            and self.world.target_found
+            and wall_direction is None
+            # 이미 일반 초록색 추격 중인 행동은 아래의 unlocked 재선택으로 처리한다.
+            and not isinstance(self.active_action, Green_Follow_Action)
+        ):
+            # 초록색을 발견해도 일반 추격으로 고정하지 않고,
+            # 센서·거리별 초록색 행동표를 즉시 다시 선택한다.
+            self.transition_to(self.choose_action(), now, cancelled=True)
+
+        # 고정되지 않은 순항·추격 행동은 매 주기 최신 센서 상태로 다시 선택한다.
+        if not self.active_action.locked:
+            self.transition_to(self.choose_action(), now)
+
+        # 짧은 완료 상태 때문에 20ms를 추가 대기하지 않도록 한 주기에서 최대 3회 전환한다.
+        # 무한 전환을 막기 위해 while문 대신 반복 횟수가 제한된 for문을 사용한다.
+        for _ in range(3):
+            # 현재 행동의 이번 단계 명령과 완료 여부를 계산한다.
+            step = self.active_action.step(now, self.world)
+            # 현재 행동이 아직 끝나지 않았는지 확인한다.
+            if not step.finished:
+                # 행동이 만든 이동 또는 Hard Stop 명령을 실제 ROS2 출력으로 보낸다.
+                self.publish_command(step.command, now)
+                # 이번 20ms 제어 주기에서 해야 할 일을 끝냈으므로 반환한다.
+                return
+
+            if isinstance(self.active_action, Opening_Action):
+                self.opening_done = True
+            if (
+                isinstance(self.active_action, Front_Color_Avoid_Action)
+                and self.active_action.color == Sensor_Color.RED
+                and self.world.target_found
+            ):
+                # 앞 빨강 회피 회전이 끝났으면 같은 목표에 먼 목표용 회전을 다시 하지 않는다.
+                self.far_green_turn_done = True
+            # 방금 완료된 행동이 먼 초록색용 45도 회전인지 확인한다.
+            if isinstance(self.active_action, Far_Green_Turn_Action):
+                # 같은 초록색 목표에서 이 회전이 반복되지 않도록 완료 기록을 남긴다.
+                self.far_green_turn_done = True
+
+            # 회전 직후에는 직진하지 않고, 새 프레임으로 안전을 확인한다.
+            if isinstance(self.active_action, Wall_Avoid_Action):
+                self.world.wall_distance = self.config.no_wall_distance
+                self.world.wall_left_distance = self.config.no_wall_distance
+                self.world.wall_right_distance = self.config.no_wall_distance
+                self.world.wall_last_received_at = 0.0
+                next_action = Wall_Verify_Action(self.config)
+            elif isinstance(self.active_action, Wall_Verify_Action):
+                if step.command.label == "WALL_VERIFY_CLEAR":
+                    self.wall_turn_direction = None
+                    self.wall_clear_started_at = None
+                    self.wall_clear_samples = 0
+                    self.get_logger().info(
+                        "WALL_VERIFY_CLEAR: "
+                        f"L={self.world.wall_left_distance:.2f}m "
+                        f"R={self.world.wall_right_distance:.2f}m"
+                    )
+                else:
+                    self.wall_turn_direction = None
+                    self.wall_clear_started_at = None
+                    self.wall_clear_samples = 0
+                    self.get_logger().warning(
+                        "WALL_VERIFY_CLOSE: "
+                        f"L={self.world.wall_left_distance:.2f}m "
+                        f"R={self.world.wall_right_distance:.2f}m"
+                    )
+                next_action = self.choose_action()
+            else:
+                next_action = self.choose_action()
+            self.active_action.exit(cancelled=False)
+            self.active_action = next_action
+            self.active_action.enter(now, self.world)
+
+        # 한 제어 주기에서 세 번 연속 즉시 완료되면 상태 전환 순환 가능성을 알린다.
+        self.get_logger().error("HFSM exceeded the transition limit in one control tick")
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = HFSMBrainNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
